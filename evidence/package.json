@@ -1,0 +1,12 @@
+{
+  "result": "PASS",
+  "archive": "Z:\\ariai\\dist\\ariai-windows-x64.zip",
+  "archive_sha256": "9b4a7c6249ecbeb4a02b29a45d100c4e0c9a40fca74f0905136cd4c183e3a69c",
+  "archive_bytes": 8391282,
+  "executable_sha256": "96f4b28248271d5f0095f618efbac11488a26ad09e80540bddab101d9bbbb0cd",
+  "manifest_entries": 18,
+  "zip_integrity": "PASS",
+  "all_manifest_hashes": "PASS",
+  "matches_independently_verified_executable": true,
+  "extracted_executable_version": "ariai 0.2.0"
+}

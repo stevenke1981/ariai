@@ -1,0 +1,11 @@
+{
+  "job_id": "3b06733f9fdc4b08b94922006b3ee76b",
+  "status": "completed",
+  "verification": {
+    "outcome": "passed",
+    "evidence_kind": "verifier",
+    "exit_code": 0,
+    "check_id": "c202a27c0c5a04bf973c1e675e0b2ff433494fb621ec1f7047329c038145a332",
+    "evidence_sha256": "a103151b66c5a85c222e9c9a31a04aceef25d2e78e962291609963b5ffe43015"
+  }
+}

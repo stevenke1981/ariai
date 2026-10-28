@@ -1,0 +1,123 @@
+{
+  "observed_at": "2026-10-28T04:44:06.564319+00:00",
+  "platform": "win32",
+  "checks": [
+    {
+      "name": "format",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "result": "PASS",
+      "seconds": 0.25,
+      "output": "evidence\\format.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "result": "PASS",
+      "seconds": 45.56,
+      "output": "evidence\\tests.log",
+      "sha256": "64d20f8da5dcaf95219a91313b70029e5e18a20332d221b2c136f8c8046f95c8"
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "result": "PASS",
+      "seconds": 4.7,
+      "output": "evidence\\clippy.log",
+      "sha256": "123435d173a1c14eed314809b6940760bbf829319a5759b812b7adff9e79f95b"
+    },
+    {
+      "name": "release",
+      "argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "result": "PASS",
+      "seconds": 85.14,
+      "output": "evidence\\release.log",
+      "sha256": "76044f8214825d97c1a03c876e997a918a4024a3a13fc934a69c4fc647899cb6"
+    },
+    {
+      "name": "version",
+      "argv": [
+        "C:\\Users\\steven\\AppData\\Local\\ariai-target\\release\\ariai.exe",
+        "--version"
+      ],
+      "exit_code": 0,
+      "result": "PASS",
+      "seconds": 0.96,
+      "output": "evidence\\version.log",
+      "sha256": "5e133e3e3a000aa01fdabef487805b72ce6780780d33abd54b8d3c0c12fffc24"
+    },
+    {
+      "name": "cli-smoke",
+      "argv": [
+        "C:\\Python314\\python.exe",
+        "-X",
+        "utf8",
+        "\\\\DVA3221\\public_ssd\\ariai\\tools\\smoke.py",
+        "C:\\Users\\steven\\AppData\\Local\\ariai-target\\release\\ariai.exe"
+      ],
+      "exit_code": 0,
+      "result": "PASS",
+      "seconds": 4.8,
+      "output": "evidence\\cli-smoke.log",
+      "sha256": "e026c803e012158899bc286c2e8cca51ab7569d04ce38b5fcce78280f7ed5a43"
+    }
+  ],
+  "result": "PASS",
+  "source_sha256": {
+    "Cargo.toml": "9608336a230587c3ce308c7da487061b3736590f5a9d719a23c7799746e49a73",
+    "Cargo.lock": "6d1605f492041596a9277f7ed0e7626cb71b75bdb75164742b8b08d22269076e",
+    "src\\cli.rs": "4cda4b002f0a15961254df7453826d3c480e2d84c4dce4dae1973ad3fae5f2be",
+    "src\\config.rs": "a0a275e6543c710d81a6884b6d788bb6c1f7745609f0e4d23fd56efa945d5cda",
+    "src\\engine.rs": "17c680a2dd59f41e3c7ee2837db6901930f474daf2e74dd7a9a80d42b976d975",
+    "src\\lib.rs": "9d29b65a90bcad3e3ce41491eed8c99b2739c61a7b14f241f212029be0f65c4a",
+    "src\\main.rs": "0e3b1d4a2a9e889ee15ab3e58f1dbb8b68850907898e8871cf37e8dc81a0588a",
+    "src\\manager.rs": "ec3723d05d7144c936a15dfdef1dbfe656a9b0c2758d6107de253064b7567603",
+    "src\\metalink.rs": "d28dcdd02f60a39c81c8f4d7e3ffac8a8fb1080864dcbc22950444f96f46771a",
+    "src\\model.rs": "f43fbf9cfbda5d667380d989e76f6d81dcf98249f8341e03d4a95581788d0cf8",
+    "src\\protocols\\ftp.rs": "77ceea50d30359e9119090386331d753c64819ceaa75cc80a85da907327f35f3",
+    "src\\protocols\\mod.rs": "589f3736ec6ff63e757d60197bdfcedc1c11873ef27fdd295261fb3a7b95b0f5",
+    "src\\protocols\\sftp.rs": "c7522c60a95e333307534fd891d9099ff28b443cfde9a48eb7c53d62df088cd2",
+    "src\\rpc.rs": "9431a5e33704aedc2c76b5b552fd74c4b3c1b0a2799cf68e38690f02af05ff21",
+    "src\\source.rs": "c784cbe215d36245c3d4832eb8cab7492f5bf75be38440b9b7be7c004be9b934",
+    "src\\torrent.rs": "9fb3bcf748f45eef439555566c7dded33694ef805e3a1283a92e86a1c9d03a37",
+    "tests\\cli.rs": "3be79f449a5dd6278682151a0bec209a2dbdc5aee6b34b1c0a3ba2a5e6b4c208",
+    "tests\\engine.rs": "9089e0076369b30924ad40d813b970c684d4ea373f784d61d4b1a221ca08258b",
+    "tests\\metalink.rs": "1c48958617dfc596edffc479a05beb1f8c3930cb4d68c89a7265aabee83bc038",
+    "tests\\model.rs": "c13e1c69c51c82d936f10a460b992657ab242d15f48739187ed9696046ea88ab",
+    "tests\\remote.rs": "d93ad69ad6b43e6373d84fe7038c7e59d4dc4b56d91dd6b5031f099c84db4d86",
+    "tests\\rpc.rs": "418b1c7f39afedfd1cbca63ab1a7e8f5c763ab645d4a6f8b2953dc7f6d3adccc",
+    "tests\\rpc_extended.rs": "f652caa5d3dada91f408768abe52b830ad9855b6c99c519206d9d2ca8a1f4a99",
+    "tests\\torrent.rs": "ed33a12f71a98d7fdde1d45118a1be2ded3495cbe0f8adb22a45ae74af61173e"
+  },
+  "artifact": {
+    "path": "C:\\Users\\steven\\AppData\\Local\\ariai-target\\release\\ariai.exe",
+    "sha256": "96f4b28248271d5f0095f618efbac11488a26ad09e80540bddab101d9bbbb0cd"
+  }
+}

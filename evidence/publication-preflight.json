@@ -1,0 +1,16 @@
+{
+  "result": "PASS",
+  "checked_staged_files": 49,
+  "unknown_credential_marker_findings": [],
+  "public_test_fixtures": [
+    {
+      "file": "tests/remote.rs",
+      "line": 187,
+      "kind": "private_key",
+      "source": "russh 0.65.0 src/helpers.rs::RSA_OPENSSH",
+      "identical_to_public_upstream_fixture": true
+    }
+  ],
+  "verified_source_matches_staged": true,
+  "previous_acceptance": "32 Rust tests and 15 release smoke scenarios PASS; no source behavior changes for publication"
+}

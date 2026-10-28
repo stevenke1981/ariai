@@ -1,0 +1,9 @@
+/target/
+/dist/
+/evidence/*.log
+*.ariai
+*.ariai.part*
+*.ariai.remote.*
+.ariai-metadata/
+__pycache__/
+
