@@ -174,6 +174,41 @@ async fn socks_proxy_carries_metadata_and_peer_traffic() {
     seed.stop().await;
 }
 
+#[tokio::test]
+async fn proxy_rejects_unavailable_discovery_and_incoming_modes() {
+    let (tx, _) = watch::channel(DownloadProgress::default());
+    for options in [
+        DownloadOptions {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            ..Default::default()
+        },
+        DownloadOptions {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            bt_initial_peers: vec!["127.0.0.1:10000".into()],
+            bt_trackers: vec!["udp://127.0.0.1:10001".into()],
+            ..Default::default()
+        },
+        DownloadOptions {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            bt_initial_peers: vec!["127.0.0.1:10000".into()],
+            bt_listen_port: Some(6881),
+            ..Default::default()
+        },
+    ] {
+        let error = torrent::download(
+            DownloadRequest {
+                uris: vec!["magnet:?xt=urn:btih:0000000000000000000000000000000000000000".into()],
+                options,
+            },
+            CancellationToken::new(),
+            tx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("proxy"));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transfer_selected_file_and_magnet_from_loopback_seed() {
     let tmp = tempfile::tempdir().unwrap();
