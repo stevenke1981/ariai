@@ -19,6 +19,7 @@ pub struct DownloadManager {
 }
 struct Inner {
     options: ManagerOptions,
+    limiter: Option<Arc<engine::RateLimiter>>,
     state: Mutex<State>,
     changed: Notify,
     events: broadcast::Sender<(String, DownloadStatus)>,
@@ -52,9 +53,16 @@ impl DownloadManager {
             "max concurrent downloads must be positive"
         );
         options.download_options.validate()?;
+        ensure!(
+            options.max_overall_upload_limit == 0,
+            "global upload limit is unsupported: BitTorrent sessions do not share a limiter"
+        );
+        let limiter = (options.max_overall_download_limit > 0)
+            .then(|| Arc::new(engine::RateLimiter::new(options.max_overall_download_limit)));
         Ok(Self {
             inner: Arc::new(Inner {
                 options,
+                limiter,
                 state: Mutex::new(State {
                     entries: Vec::new(),
                     shutting_down: false,
@@ -160,7 +168,13 @@ impl DownloadManager {
                 .send((gid.clone(), DownloadStatus::Active));
             let manager = self.clone();
             tokio::spawn(async move {
-                let result = engine::download(request, cancel, progress_tx).await;
+                let result = engine::download_with_limit(
+                    request,
+                    cancel,
+                    progress_tx,
+                    manager.inner.limiter.clone(),
+                )
+                .await;
                 let mut state = manager.inner.state.lock().await;
                 if let Some(entry) = state.entries.iter_mut().find(|e| e.snapshot.gid == gid) {
                     let progress = entry.progress.borrow().clone();

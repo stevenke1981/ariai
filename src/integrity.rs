@@ -78,6 +78,17 @@ pub async fn repair_file(
     cancel: &CancellationToken,
     progress: &watch::Sender<DownloadProgress>,
 ) -> Result<()> {
+    repair_file_with_limit(path, request, session, cancel, progress, None).await
+}
+
+pub(crate) async fn repair_file_with_limit(
+    path: &Path,
+    request: &DownloadRequest,
+    session: &HttpSession,
+    cancel: &CancellationToken,
+    progress: &watch::Sender<DownloadProgress>,
+    limiter: Option<&crate::engine::RateLimiter>,
+) -> Result<()> {
     let options = &request.options;
     let Some(pieces) = &options.piece_hashes else {
         return crate::protocols::verify_file(path, options).await;
@@ -166,6 +177,7 @@ pub async fn repair_file(
                         file.write_all(&chunk).await?;
                         hash.update(&chunk);
                         received += chunk.len() as u64;
+                        if let Some(limiter) = limiter { limiter.acquire(chunk.len() as u64, cancel).await?; }
                         if options.max_download_limit > 0 {
                             tokio::select! {
                                 _ = cancel.cancelled() => bail!("download cancelled"),

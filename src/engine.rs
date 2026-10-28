@@ -18,6 +18,27 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub(crate) struct RateLimiter {
+    bytes_per_second: u64,
+    next: Mutex<Instant>,
+}
+impl RateLimiter {
+    pub(crate) fn new(bytes_per_second: u64) -> Self {
+        Self {
+            bytes_per_second,
+            next: Mutex::new(Instant::now()),
+        }
+    }
+    pub(crate) async fn acquire(&self, bytes: u64, cancel: &CancellationToken) -> Result<()> {
+        let mut next = tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), next = self.next.lock() => next };
+        let end = (*next).max(Instant::now())
+            + Duration::from_secs_f64(bytes as f64 / self.bytes_per_second as f64);
+        tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), _ = tokio::time::sleep(end.saturating_duration_since(Instant::now())) => {} }
+        *next = end;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Validator {
     etag: Option<String>,
@@ -59,6 +80,7 @@ struct Shared {
     progress: watch::Sender<DownloadProgress>,
     state: Arc<Mutex<State>>,
     target: PathBuf,
+    limiter: Option<Arc<RateLimiter>>,
 }
 struct State {
     completed: u64,
@@ -105,6 +127,9 @@ async fn send(
     tokio::select! { _ = shared.cancel.cancelled() => bail!("download cancelled"), response = shared.client.send(builder) => response }
 }
 async fn update(shared: &Shared, bytes: u64) -> Result<()> {
+    if let Some(limiter) = &shared.limiter {
+        limiter.acquire(bytes, &shared.cancel).await?;
+    }
     let mut state = shared.state.lock().await;
     state.completed += bytes;
     let elapsed = state.start.elapsed().as_secs_f64().max(0.001);
@@ -228,6 +253,15 @@ pub async fn download(
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
 ) -> Result<DownloadResult> {
+    download_with_limit(request, cancel, progress, None).await
+}
+
+pub(crate) async fn download_with_limit(
+    request: DownloadRequest,
+    cancel: CancellationToken,
+    progress: watch::Sender<DownloadProgress>,
+    limiter: Option<Arc<RateLimiter>>,
+) -> Result<DownloadResult> {
     request.validate()?;
     let first = &request.uris[0];
     let parsed = url::Url::parse(first).ok();
@@ -242,6 +276,10 @@ pub async fn download(
                 matches!(url.scheme(), "http" | "https") && url.path().ends_with(".torrent")
             }));
     if torrent {
+        ensure!(
+            limiter.is_none(),
+            "global download limit is unsupported for BitTorrent sessions"
+        );
         return crate::torrent::download(request, cancel, progress).await;
     }
     let mut schemes = Vec::new();
@@ -273,12 +311,26 @@ pub async fn download(
             options: request.options.clone(),
         };
         let result = match scheme.as_str() {
-            "http" => download_http(attempt, cancel.clone(), progress.clone()).await,
+            "http" => {
+                download_http(attempt, cancel.clone(), progress.clone(), limiter.clone()).await
+            }
             "ftp" => {
-                crate::protocols::ftp::download(attempt, cancel.clone(), progress.clone()).await
+                crate::protocols::ftp::download_with_limit(
+                    attempt,
+                    cancel.clone(),
+                    progress.clone(),
+                    limiter.clone(),
+                )
+                .await
             }
             "sftp" => {
-                crate::protocols::sftp::download(attempt, cancel.clone(), progress.clone()).await
+                crate::protocols::sftp::download_with_limit(
+                    attempt,
+                    cancel.clone(),
+                    progress.clone(),
+                    limiter.clone(),
+                )
+                .await
             }
             _ => bail!("unsupported source protocol: {scheme}"),
         };
@@ -297,11 +349,13 @@ async fn download_http(
     request: DownloadRequest,
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
+    limiter: Option<Arc<RateLimiter>>,
 ) -> Result<DownloadResult> {
     request.validate()?;
     let options = &request.options;
     let client = HttpSession::new(options)?;
-    let result = download_http_inner(request.clone(), cancel, progress, client.clone()).await;
+    let result =
+        download_http_inner(request.clone(), cancel, progress, client.clone(), limiter).await;
     let saved = client.save_cookies().await;
     match result {
         Ok(result) => {
@@ -320,6 +374,7 @@ async fn download_http_inner(
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
     client: HttpSession,
+    limiter: Option<Arc<RateLimiter>>,
 ) -> Result<DownloadResult> {
     let options = &request.options;
     let name = match &options.out {
@@ -353,7 +408,15 @@ async fn download_http_inner(
         tokio::fs::create_dir_all(parent).await?;
     }
     if options.check_integrity && options.piece_hashes.is_some() && target.exists() {
-        crate::integrity::repair_file(&target, &request, &client, &cancel, &progress).await?;
+        crate::integrity::repair_file_with_limit(
+            &target,
+            &request,
+            &client,
+            &cancel,
+            &progress,
+            limiter.as_deref(),
+        )
+        .await?;
         let length = tokio::fs::metadata(&target).await?.len();
         progress.send_modify(|p| {
             p.path = Some(target.clone());
@@ -395,6 +458,7 @@ async fn download_http_inner(
             rate_at: now,
         })),
         target: target.clone(),
+        limiter,
     };
     progress.send_modify(|p| {
         p.path = Some(target.clone());
@@ -603,9 +667,15 @@ async fn download_http_inner(
     if let Some(expected) = total {
         ensure!(written == expected, "assembled length mismatch");
     }
-    let repaired =
-        crate::integrity::repair_file(&assembled, &request, &shared.client, &cancel, &progress)
-            .await;
+    let repaired = crate::integrity::repair_file_with_limit(
+        &assembled,
+        &request,
+        &shared.client,
+        &cancel,
+        &progress,
+        shared.limiter.as_deref(),
+    )
+    .await;
     progress.send_modify(|p| p.path = Some(target.clone()));
     if let Err(err) = repaired {
         let _ = tokio::fs::remove_file(&assembled).await;

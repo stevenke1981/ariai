@@ -239,3 +239,54 @@ async fn cancel_then_resume_and_changed_validator_restart() {
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn overall_limit_covers_parallel_ranged_downloads() {
+    use ariai::{
+        manager::DownloadManager,
+        model::{DownloadStatus, ManagerOptions},
+    };
+    let (url, server) = start(true, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(ManagerOptions {
+        max_concurrent_downloads: 2,
+        max_overall_download_limit: 128 * 1024,
+        ..Default::default()
+    })
+    .unwrap();
+    let started = std::time::Instant::now();
+    for i in 0..2 {
+        let mut req = request(vec![url.clone()], dir.path());
+        req.options.out = Some(format!("range-{i}"));
+        manager.add(req).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(8), manager.wait_idle())
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        manager
+            .list()
+            .await
+            .iter()
+            .all(|s| s.status == DownloadStatus::Complete)
+    );
+    assert!(server.requests.load(Ordering::SeqCst) >= 10);
+    assert!(
+        elapsed >= Duration::from_millis(1800),
+        "ranged transfers exceeded aggregate limit: {elapsed:?}"
+    );
+    for i in 0..2 {
+        assert_eq!(
+            tokio::fs::read(dir.path().join(format!("range-{i}")))
+                .await
+                .unwrap(),
+            *server.bytes
+        );
+    }
+    println!(
+        "two ranged transfers: {} bytes in {:?}",
+        2 * server.bytes.len(),
+        elapsed
+    );
+}

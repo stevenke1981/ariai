@@ -69,6 +69,7 @@ async fn transfer(
     cancel: &CancellationToken,
     progress: &watch::Sender<DownloadProgress>,
     range: Option<(u64, u64)>,
+    limiter: Option<&crate::engine::RateLimiter>,
 ) -> Result<()> {
     let opts = &request.options;
     let url = url::Url::parse(uri)?;
@@ -223,6 +224,9 @@ async fn transfer(
             p.download_speed =
                 ((offset - initial) as f64 / start.elapsed().as_secs_f64().max(0.001)) as u64;
         });
+        if let Some(limiter) = limiter {
+            limiter.acquire(n as u64, cancel).await?;
+        }
         if opts.max_download_limit > 0 {
             let wait =
                 Duration::from_secs_f64((offset - initial) as f64 / opts.max_download_limit as f64)
@@ -249,6 +253,7 @@ async fn repair_partial(
     target: &Path,
     cancel: &CancellationToken,
     progress: &watch::Sender<DownloadProgress>,
+    limiter: Option<&crate::engine::RateLimiter>,
 ) -> Result<()> {
     let partial = super::side_path(target, ".ariai.remote.part");
     let (length, bad) = crate::integrity::bad_pieces(&partial, &request.options, cancel).await?;
@@ -267,7 +272,7 @@ async fn repair_partial(
             for uri in &request.uris {
                 let result = tokio::select! {
                     _ = cancel.cancelled() => bail!("download cancelled"),
-                    result = transfer(&repair_request, uri, target, cancel, progress, Some((start, size))) => result,
+                    result = transfer(&repair_request, uri, target, cancel, progress, Some((start, size)), limiter) => result,
                 };
                 match result {
                     Ok(()) => {
@@ -306,6 +311,15 @@ pub async fn download(
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
 ) -> Result<DownloadResult> {
+    download_with_limit(request, cancel, progress, None).await
+}
+
+pub(crate) async fn download_with_limit(
+    request: DownloadRequest,
+    cancel: CancellationToken,
+    progress: watch::Sender<DownloadProgress>,
+    limiter: Option<std::sync::Arc<crate::engine::RateLimiter>>,
+) -> Result<DownloadResult> {
     request.validate()?;
     ensure!(request.options.proxy.is_none(), "SFTP proxy is unsupported");
     let mut target_request = request.clone();
@@ -320,7 +334,7 @@ pub async fn download(
     {
         let partial = super::side_path(&target, ".ariai.remote.part");
         tokio::fs::copy(&target, &partial).await?;
-        repair_partial(&request, &target, &cancel, &progress).await?;
+        repair_partial(&request, &target, &cancel, &progress, limiter.as_deref()).await?;
         ensure!(!cancel.is_cancelled(), "download cancelled");
         let mut options = request.options.clone();
         options.allow_overwrite = true;
@@ -331,13 +345,13 @@ pub async fn download(
     let mut last = anyhow!("no SFTP mirror succeeded");
     for attempt in 0..request.options.max_tries.max(1) {
         for uri in &request.uris {
-            let result = tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), result = transfer(&request, uri, &target, &cancel, &progress, None) => result };
+            let result = tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), result = transfer(&request, uri, &target, &cancel, &progress, None, limiter.as_deref()) => result };
             match result {
                 Ok(()) => {
                     let partial = super::side_path(&target, ".ariai.remote.part");
                     let result = async {
                         if request.options.piece_hashes.is_some() {
-                            repair_partial(&request, &target, &cancel, &progress).await?;
+                            repair_partial(&request, &target, &cancel, &progress, limiter.as_deref()).await?;
                         }
                         ensure!(!cancel.is_cancelled(), "download cancelled");
                         super::publish(&partial, &target, &request.options).await

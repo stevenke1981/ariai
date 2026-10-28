@@ -608,3 +608,167 @@ async fn ftp_cancellation_during_piece_repair_keeps_original() {
     assert_eq!(tokio::fs::read(&target).await.unwrap(), b"abcdXXXXijklm");
     server.abort();
 }
+
+#[tokio::test]
+async fn overall_limit_shares_capacity_between_http_and_ftp_downloads() {
+    use ariai::{
+        manager::DownloadManager,
+        model::{DownloadStatus, ManagerOptions},
+    };
+    let payload = vec![42; 64 * 1024];
+    let (ftp_addr, _, ftp_task) = ftp_server(payload.clone()).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_addr = listener.local_addr().unwrap();
+    let http_task = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let payload = payload.clone();
+            tokio::spawn(async move {
+                let mut request = [0; 4096];
+                use tokio::io::AsyncReadExt;
+                let _ = socket.read(&mut request).await;
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                let _ = socket.write_all(&payload).await;
+            });
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(ManagerOptions {
+        max_concurrent_downloads: 3,
+        max_overall_download_limit: 64 * 1024,
+        ..Default::default()
+    })
+    .unwrap();
+    let start = std::time::Instant::now();
+    for i in 0..3 {
+        let mut req = request(ftp_addr, dir.path());
+        req.options.out = Some(format!("result{i}"));
+        if i < 2 {
+            req.uris = vec![format!("http://{http_addr}/file{i}")];
+        }
+        manager.add(req).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(12), manager.wait_idle())
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    println!("three transfers: {} bytes in {:?}", 3 * 64 * 1024, elapsed);
+    let snapshots = manager.list().await;
+    assert!(
+        snapshots
+            .iter()
+            .all(|s| s.status == DownloadStatus::Complete),
+        "{snapshots:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(2800),
+        "aggregate rate exceeded limit: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(9),
+        "unexpectedly slow: {elapsed:?}"
+    );
+    for i in 0..3 {
+        assert_eq!(
+            tokio::fs::read(dir.path().join(format!("result{i}")))
+                .await
+                .unwrap(),
+            vec![42; 64 * 1024]
+        );
+    }
+    ftp_task.abort();
+    http_task.abort();
+}
+
+#[tokio::test]
+async fn cancelled_transfer_releases_overall_limiter() {
+    use ariai::{
+        manager::DownloadManager,
+        model::{DownloadStatus, ManagerOptions},
+    };
+    let (addr, _, server) = ftp_server(vec![42; 64 * 1024]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(ManagerOptions {
+        max_concurrent_downloads: 2,
+        max_overall_download_limit: 16 * 1024,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut first = request(addr, dir.path());
+    first.options.out = Some("first".into());
+    let gid = manager.add(first).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager.get(&gid).await.unwrap().completed_length > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), manager.pause(&gid))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut second = request(addr, dir.path());
+    second.options.out = Some("second".into());
+    let second_gid = manager.add(second).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(7), manager.wait_idle())
+        .await
+        .unwrap();
+    assert_eq!(
+        manager.get(&second_gid).await.unwrap().status,
+        DownloadStatus::Complete
+    );
+    server.abort();
+}
+
+#[test]
+fn unsupported_overall_upload_limit_is_rejected() {
+    use ariai::{manager::DownloadManager, model::ManagerOptions};
+    assert!(
+        DownloadManager::new(ManagerOptions {
+            max_overall_upload_limit: 1,
+            ..Default::default()
+        })
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn overall_download_limit_rejects_torrent() {
+    use ariai::{
+        manager::DownloadManager,
+        model::{DownloadStatus, ManagerOptions},
+    };
+    let manager = DownloadManager::new(ManagerOptions {
+        max_overall_download_limit: 65536,
+        ..Default::default()
+    })
+    .unwrap();
+    let req = DownloadRequest {
+        uris: vec!["magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into()],
+        options: DownloadOptions::default(),
+    };
+    let gid = manager.add(req).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), manager.wait_idle())
+        .await
+        .unwrap();
+    let result = manager.get(&gid).await.unwrap();
+    assert_eq!(result.status, DownloadStatus::Error);
+    assert!(
+        result
+            .error
+            .unwrap()
+            .contains("global download limit is unsupported for BitTorrent")
+    );
+}
