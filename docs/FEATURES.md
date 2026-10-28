@@ -44,6 +44,6 @@
 | server-stat／URI selector、hooks、daemon/service | 尚未實作 | CLI RPC 可前景常駐，沒有背景服務安裝 |
 | allocation／disk-cache／mmap／piece policy | 尚未逐項對齊 | 目前採各原生引擎的 I/O，未重現全部 aria2 選項 |
 | IPv6／Async DNS／Happy Eyeballs | 依各引擎能力 | IPv6 專項 NOT_RUN；BT listener 目前 IPv4 |
-| Windows／Linux／macOS／MSRV | Windows 本機驗收，CI 三平台配置 | 0.2.0 Windows/macOS CI 通過、Ubuntu 續傳測試失敗已修正；0.3.0 CI 以當次遠端結果為準；Rust 1.89 NOT_RUN |
+| Windows／Linux／macOS／MSRV | Windows 本機驗收，CI 三平台配置 | 0.3.0 CI 三平台通過；本分支 CI 以當次遠端結果為準；Rust 1.89 NOT_RUN |
 
 所有 PASS 以 evidence/verification.json 和 ACCEPTANCE.md 的當次命令結果為準；依賴提供某能力不代表已驗證 aria2 行為相容。
