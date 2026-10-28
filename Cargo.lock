@@ -170,6 +170,7 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
+ "sootmark-sqlite",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -3998,6 +3999,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "sootmark-sqlite"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4734c8224fde044029a00acd3c79637162e9e4d258b3b683108993713d990dcb"
 
 [[package]]
 name = "spinning_top"
