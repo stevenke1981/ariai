@@ -1,6 +1,6 @@
 # ariai
 
-原生 Rust 下載器，目標逐步對齊 aria2。**0.3.0 新增 XML-RPC／multicall、Digest／Netscape cookies、BT 限速／做種比例及 HTTP(S) Metalink 分片修復；完整 aria2 相容性仍在分階段補齊。** 不呼叫 aria2c，也沒有 libaria2 相容後端。
+原生 Rust 下載器，目標逐步對齊 aria2。包含 XML-RPC／multicall、Digest、瀏覽器 SQLite cookies、BT 限速／做種比例及 Metalink 分片修復；完整 aria2 相容性仍在分階段補齊。不呼叫 aria2c，也沒有 libaria2 相容後端。
 
 提供 HTTP/HTTPS、FTP/SFTP、BitTorrent/Magnet 與 Metalink 3/4，包含來源識別續傳、鏡像切換、校驗、佇列、CLI、HTTP/WebSocket JSON-RPC 與下載事件。FTP/SFTP 目前採單串流；BitTorrent 使用 librqbit 原生協定核心。完整功能差距見 [功能矩陣](docs/FEATURES.md)，197 個上游長選項盤點見 [aria2-options.txt](docs/aria2-options.txt)。
 
@@ -54,11 +54,11 @@ ariai -M files.meta4 --select-file=2
 
 SFTP 必須通過 known_hosts 或 `--ssh-host-key-md=sha-256=HEX` 主機金鑰驗證；可用 URI 密碼或 `--ftp-user`／`--ftp-passwd`，私鑰可配 `--ssh-passphrase`。FTP 使用 EPSV/PASV，被動模式預設開啟；`--ftp-pasv=false` 使用主動模式。FTP/SFTP 代理尚未支援。
 
-Torrent 接受本機路徑、file URL、HTTP(S) `.torrent` 與 magnet；依 metadata 命名檔案，忽略 `--out`。`--seed-time` 單位為分鐘，未要求做種時下載驗證完成即停止，與 aria2 預設行為不同。`--seed-ratio=1` 做種至上傳量達選取資料量；比例與正值時間並用時先達者停止。比例 `0` 不限比例，明確指定 `--seed-time=0` 則停用做種。`--max-download-limit`／`--max-upload-limit` 支援每 torrent 限速，0 不限速，非零值目前限 16384 至 4294967295 bytes/s，含初始 token bucket burst；全域合計限速待補。`--enable-dht=false` 可關閉 DHT；`--bt-tracker` 接受逗號分隔 URL，`--listen-port` 目前只接受單一埠。`--bt-initial-peer=IP:PORT` 是 ariai 的受控測試擴充選項。BT 代理與外部 checksum 選項目前明確拒絕；HTTP metadata 的 Digest／cookies 尚未接入 BT 引擎。
+Torrent 接受本機路徑、file URL、HTTP(S) `.torrent` 與 magnet；依 metadata 命名檔案，忽略 `--out`。`--seed-time` 單位為分鐘，未要求做種時下載驗證完成即停止，與 aria2 預設行為不同。`--seed-ratio=1` 做種至上傳量達選取資料量；比例與正值時間並用時先達者停止。比例 `0` 不限比例，明確指定 `--seed-time=0` 則停用做種。`--max-download-limit`／`--max-upload-limit` 支援每 torrent 限速，0 不限速，非零值目前限 16384 至 4294967295 bytes/s，含初始 token bucket burst。`--enable-dht=false` 可關閉 DHT；`--bt-tracker` 接受逗號分隔 URL，`--listen-port` 目前只接受單一埠。`--bt-initial-peer=IP:PORT` 是 ariai 擴充選項。BT 可用 `--all-proxy=socks5://host:port` 搭配明確指定的初始 peer；代理模式停用 tracker、DHT 與入站連線，明確指定 tracker 或監聽埠會報錯。外部 checksum 仍不支援；HTTP metadata 的 Digest／cookies 尚未接入 BT 引擎。
 
-`.meta4`／`.metalink` URI 可自動展開，`-M -` 從 stdin 讀取 XML。Metalink 支援檔案選取、相對 URL、鏡像順序、尺寸、整檔與分片 hash。HTTP(S) 下載後若有分片 hash，會只修復錯誤分片；`ariai -M files.meta4 --check-integrity` 可驗證並修復既有檔案，保留正確分片。截短檔案需 manifest size；FTP/SFTP 分片修復、只有整檔 hash 的既有檔案修復與 Metalink HTTP discovery 待補。目前整檔與分片 hash 都會驗證，與 aria2 同時提供兩者時的選擇語義不同。
+`.meta4`／`.metalink` URI 可自動展開，`-M -` 從 stdin 讀取 XML。Metalink 支援檔案選取、相對 URL、鏡像順序、尺寸、整檔與分片 hash。HTTP(S)、FTP 和 SFTP 下載後若有分片 hash，會修復錯誤分片；`ariai -M files.meta4 --check-integrity` 可驗證並修復既有檔案，保留正確分片。截短檔案需 manifest size；只有整檔 hash 的既有檔案修復與 Metalink HTTP discovery 待補。目前整檔與分片 hash 都會驗證，與 aria2 同時提供兩者時的選擇語義不同。
 
-HTTP 檔案與遠端 Metalink metadata 共用 Digest MD5／SHA-256（含 sess）及 qop=auth；auth-int、netrc、SQLite cookie 待補。`--http-auth-challenge` 等待伺服器 challenge 再認證。`--load-cookies=cookies.txt`／`--save-cookies=cookies.txt` 使用 Netscape 格式，處理 domain/path/expiry/Secure 與重新導向；cookie 記憶體目前以每次下載為單位，多工作共同儲存同一 cookie 檔案的合併待補。
+HTTP 檔案與遠端 Metalink metadata 共用 Digest MD5／SHA-256（含 sess）及 qop=auth／auth-int；netrc 尚未支援。`--http-auth-challenge` 等待伺服器 challenge 再認證。`--load-cookies` 可讀 Netscape 或 Firefox／Chromium SQLite（含已提交 WAL），`--save-cookies` 輸出 Netscape 格式。Chromium 加密值不支援，請使用已關閉瀏覽器的穩定資料庫副本；多工作共同儲存同一 cookie 檔案的合併待補。
 
 ## HTTP／WebSocket JSON-RPC 與 XML-RPC
 
@@ -75,7 +75,7 @@ Invoke-RestMethod http://127.0.0.1:6800/jsonrpc -Method Post -ContentType applic
 
 完整方法清單由 `system.listMethods` 回傳。新增 `addMetalink`／`addTorrent`（base64 metadata）、`getUris`／`getFiles`／`getOption`、`getGlobalOption`、`changePosition`、`changeOption` 與 force 操作別名。設定僅可修改等待或已停止傳輸的暫停工作，活動中的修改會回錯誤。`addTorrent` 將 metadata 存於輸出目錄的 `.ariai-metadata`，以便 session 恢復；web-seed URI 注入尚未支援。
 
-同一路徑 `ws://127.0.0.1:6800/jsonrpc` 支援 WebSocket JSON-RPC、batch 與五種下載事件：Start／Pause／Stop／Complete／Error。設定 secret 時，每次下載方法呼叫仍須帶 token；連線首次認證前不傳送下載事件。事件佇列溢出會關閉連線，需重新連線並查詢狀態。`http://127.0.0.1:6800/rpc` 提供 XML-RPC POST，共用方法與認證，支援 string/base64/int/i4/i8/double/boolean/array/struct。`system.multicall` 每個子呼叫各自帶 token，成功回單元素陣列、失敗回 fault struct；不接受巢狀 multicall。XML dateTime/nil/GET、全域動態設定及其他未列方法尚未實作。
+同一路徑 `ws://127.0.0.1:6800/jsonrpc` 支援 WebSocket JSON-RPC、batch 與五種下載事件：Start／Pause／Stop／Complete／Error。設定 secret 時，每次下載方法呼叫仍須帶 token；連線首次認證前不傳送下載事件。事件佇列溢出會關閉連線，需重新連線並查詢狀態。`http://127.0.0.1:6800/rpc` 提供 XML-RPC POST，共用方法與認證，支援 string/base64/int/i4/i8/double/boolean/array/struct/nil。dateTime 可解析並保留型別，但目前方法沒有日期參數，傳入會回參數錯誤。`system.multicall` 每個子呼叫各自帶 token，成功回單元素陣列、失敗回 fault struct；不接受巢狀 multicall。XML GET、全域動態設定及其他未列方法尚未實作。
 
 RPC 的 uploadLength／uploadSpeed／connections 回報 BT 引擎實際統計，停止後保留上傳量、速率與連線數歸零；其他協定連線統計尚未接入。
 

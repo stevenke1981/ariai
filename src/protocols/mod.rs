@@ -144,7 +144,6 @@ pub async fn publish(
     let total_length = tokio::fs::metadata(partial).await?.len();
     if target.exists() {
         ensure!(options.allow_overwrite, "output already exists");
-        tokio::fs::remove_file(target).await?;
     }
     tokio::fs::rename(partial, target).await?;
     Ok(DownloadResult {

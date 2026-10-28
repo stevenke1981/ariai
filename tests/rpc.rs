@@ -227,6 +227,6 @@ async fn imports_aria2_text_session_atomically() {
     assert_eq!(saved.request.options.split, 2);
     tokio::fs::write(&path, "http://example.org/a\n gid=1111111111111111\n pause=true\nhttp://example.org/b\n unsupported-option=value\n").await.unwrap();
     assert!(manager.load_session(&path).await.is_err());
-    assert!(manager.get("1111111111111111").await.is_err());
+    assert!(manager.get("1111111111111111").await.is_none());
     manager.shutdown().await.unwrap();
 }
