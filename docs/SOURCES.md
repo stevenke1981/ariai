@@ -11,5 +11,9 @@
 - [librqbit 9.0.1](https://docs.rs/librqbit/9.0.1/librqbit/)：原生 Rust BitTorrent Session、metadata、檔案選取及統計介面。
 - [russh 0.65.0](https://docs.rs/russh/0.65.0/russh/) 與 [russh-sftp 3.0.1](https://docs.rs/russh-sftp/3.0.1/russh_sftp/)：SSH、主機金鑰、認證與 SFTP 檔案介面。
 - [quick-xml 0.42.0](https://docs.rs/quick-xml/0.42.0/quick_xml/)：namespace-aware Metalink XML 解析。
+- [cookie_store 0.22.0 原始專案](https://github.com/pfernie/cookie_store)：cookie scope／expiry，搭配 Netscape 格式輸入輸出。
+- [httpdate 1.0.3](https://docs.rs/httpdate/1.0.3/httpdate/)：HTTP cookie 日期格式。
+
+0.3.0 再查閱 aria2 官方手冊的 XML-RPC／multicall token、seed-ratio／seed-time、check-integrity 語義；librqbit 限速與統計亦對照 Cargo registry 內鎖定版本的原始碼。
 
 依賴的實際解析版本以 Cargo.lock 為準；最新網站版本不代表此專案使用的版本。aria2 文件是相容性規格參考，專案不包含 aria2 原始碼或執行檔。

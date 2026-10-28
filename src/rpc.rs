@@ -46,6 +46,7 @@ pub async fn serve(
     });
     let app = Router::new()
         .route("/jsonrpc", post(handle).get(websocket))
+        .route("/rpc", post(handle_xml))
         .with_state(state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown.cancelled_owned())
@@ -68,6 +69,21 @@ async fn handle(State(state): State<Arc<RpcState>>, body: Bytes) -> Response {
         Some(value) => (StatusCode::OK, axum::Json(value)).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
+}
+async fn handle_xml(State(state): State<Arc<RpcState>>, body: Bytes) -> Response {
+    let result = match crate::xmlrpc::parse(&body) {
+        Ok((method, params)) => {
+            let mut authenticated = state.secret.is_none();
+            invoke(&state, &method, params, &mut authenticated).await
+        }
+        Err(()) => Err((-32700, "Parse error".into())),
+    };
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/xml; charset=utf-8")],
+        crate::xmlrpc::response(result),
+    )
+        .into_response()
 }
 async fn process(state: &RpcState, value: Value, authenticated: &mut bool) -> Option<Value> {
     if let Value::Array(batch) = value {
@@ -139,20 +155,71 @@ async fn dispatch(state: &RpcState, request: Value, authenticated: &mut bool) ->
         Some(Value::Array(v)) => v.clone(),
         Some(_) => return id.map(|id| error(id, -32602, "Invalid params")),
     };
-    if let Some(secret) = &state.secret {
-        let expected = format!("token:{secret}");
-        if params.first().and_then(Value::as_str) != Some(expected.as_str()) {
-            return id.map(|id| error(id, 1, "Unauthorized"));
-        }
-        params.remove(0);
-    }
-    *authenticated = true;
     let method = object["method"].as_str().unwrap_or_default();
-    let result = execute(state, method, &params).await;
+    let result = invoke(state, method, std::mem::take(&mut params), authenticated).await;
     id.map(|id| match result {
         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
         Err((code, message)) => error(id, code, &message),
     })
+}
+async fn invoke(
+    state: &RpcState,
+    method: &str,
+    params: Vec<Value>,
+    authenticated: &mut bool,
+) -> RpcResult {
+    if method == "system.multicall" {
+        count(&params, 1, 1)?;
+        let calls = params[0].as_array().ok_or_else(invalid)?;
+        if calls.len() > 1000 {
+            return Err(invalid());
+        }
+        let mut results = Vec::with_capacity(calls.len());
+        for call in calls {
+            let result = match (
+                call.get("methodName").and_then(Value::as_str),
+                call.get("params").and_then(Value::as_array),
+            ) {
+                (Some("system.multicall"), _) => {
+                    Err((-32600, "Recursive multicall is not allowed".into()))
+                }
+                (Some(name), Some(nested)) => {
+                    invoke_single(state, name, nested.clone(), authenticated).await
+                }
+                _ => Err(invalid()),
+            };
+            results.push(match result {
+                Ok(value) => json!([value]),
+                Err((code, message)) => json!({"faultCode":code,"faultString":message}),
+            });
+        }
+        return Ok(Value::Array(results));
+    }
+    invoke_single(state, method, params, authenticated).await
+}
+async fn invoke_single(
+    state: &RpcState,
+    method: &str,
+    mut params: Vec<Value>,
+    authenticated: &mut bool,
+) -> RpcResult {
+    let supplied = params
+        .first()
+        .and_then(Value::as_str)
+        .filter(|s| s.starts_with("token:"));
+    if let Some(secret) = &state.secret {
+        if supplied == Some(format!("token:{secret}").as_str()) {
+            params.remove(0);
+            *authenticated = true;
+        } else if !matches!(method, "system.listMethods" | "system.listNotifications") {
+            return Err((1, "Unauthorized".into()));
+        } else if supplied.is_some() {
+            params.remove(0);
+        }
+    } else if supplied.is_some() {
+        params.remove(0);
+    }
+    execute(state, method, &params).await
 }
 type RpcResult = std::result::Result<Value, (i32, String)>;
 fn invalid() -> (i32, String) {
@@ -217,9 +284,18 @@ fn status(snapshot: DownloadSnapshot, keys: Option<&[&str]>) -> Value {
         "downloadSpeed".into(),
         json!(snapshot.download_speed.to_string()),
     );
-    map.insert("uploadLength".into(), json!("0"));
-    map.insert("uploadSpeed".into(), json!("0"));
-    map.insert("connections".into(), json!("0"));
+    map.insert(
+        "uploadLength".into(),
+        json!(snapshot.upload_length.to_string()),
+    );
+    map.insert(
+        "uploadSpeed".into(),
+        json!(snapshot.upload_speed.to_string()),
+    );
+    map.insert(
+        "connections".into(),
+        json!(snapshot.connections.to_string()),
+    );
     map.insert(
         "dir".into(),
         json!(snapshot.request.options.dir.to_string_lossy()),
@@ -267,7 +343,7 @@ fn position(value: Option<&Value>) -> std::result::Result<Option<usize>, (i32, S
         .transpose()
 }
 fn option_values(options: &DownloadOptions) -> Value {
-    json!({"dir":options.dir.to_string_lossy(),"out":options.out.as_deref().unwrap_or(""),"split":options.split.to_string(),"min-split-size":options.min_split_size.to_string(),"continue":options.continue_download.to_string(),"max-tries":options.max_tries.to_string(),"retry-wait":options.retry_wait_secs.to_string(),"timeout":options.timeout_secs.to_string(),"connect-timeout":options.connect_timeout_secs.to_string(),"max-download-limit":options.max_download_limit.to_string(),"allow-overwrite":options.allow_overwrite.to_string(),"auto-file-renaming":options.auto_file_renaming.to_string(),"user-agent":options.user_agent,"header":options.headers.join("\n"),"referer":options.referer.as_deref().unwrap_or(""),"all-proxy":options.proxy.as_deref().unwrap_or(""),"checksum":options.checksum.as_deref().unwrap_or(""),"ftp-pasv":options.ftp_pasv.to_string(),"select-file":options.select_file.as_deref().unwrap_or(""),"bt-tracker":options.bt_trackers.join(","),"enable-dht":options.bt_enable_dht.to_string(),"seed-time":(options.seed_time_secs as f64/60.0).to_string(),"follow-torrent":options.follow_torrent.to_string(),"follow-metalink":options.follow_metalink.to_string()})
+    json!({"dir":options.dir.to_string_lossy(),"out":options.out.as_deref().unwrap_or(""),"split":options.split.to_string(),"min-split-size":options.min_split_size.to_string(),"continue":options.continue_download.to_string(),"max-tries":options.max_tries.to_string(),"retry-wait":options.retry_wait_secs.to_string(),"timeout":options.timeout_secs.to_string(),"connect-timeout":options.connect_timeout_secs.to_string(),"max-download-limit":options.max_download_limit.to_string(),"allow-overwrite":options.allow_overwrite.to_string(),"auto-file-renaming":options.auto_file_renaming.to_string(),"user-agent":options.user_agent,"header":options.headers.join("\n"),"referer":options.referer.as_deref().unwrap_or(""),"all-proxy":options.proxy.as_deref().unwrap_or(""),"checksum":options.checksum.as_deref().unwrap_or(""),"ftp-pasv":options.ftp_pasv.to_string(),"select-file":options.select_file.as_deref().unwrap_or(""),"bt-tracker":options.bt_trackers.join(","),"enable-dht":options.bt_enable_dht.to_string(),"seed-time":(options.seed_time_secs as f64/60.0).to_string(),"follow-torrent":options.follow_torrent.to_string(),"follow-metalink":options.follow_metalink.to_string(),"load-cookies":options.load_cookies.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"save-cookies":options.save_cookies.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"http-auth-challenge":options.http_auth_challenge.to_string(),"max-upload-limit":options.max_upload_limit.to_string(),"seed-ratio":options.seed_ratio.map(|n|n.to_string()).unwrap_or_default(),"check-integrity":options.check_integrity.to_string()})
 }
 async fn execute(state: &RpcState, method: &str, params: &[Value]) -> RpcResult {
     let manager = &state.manager;
@@ -485,6 +561,7 @@ async fn execute(state: &RpcState, method: &str, params: &[Value]) -> RpcResult 
             count(params, 0, 0)?;
             let mut counters: HashMap<&str, u64> = HashMap::new();
             let mut speed = 0;
+            let mut upload_speed = 0;
             for item in manager.list().await {
                 let key = match item.status {
                     DownloadStatus::Active => "numActive",
@@ -493,15 +570,17 @@ async fn execute(state: &RpcState, method: &str, params: &[Value]) -> RpcResult 
                 };
                 *counters.entry(key).or_default() += 1;
                 speed += item.download_speed;
+                upload_speed += item.upload_speed;
             }
             Ok(
-                json!({"downloadSpeed":speed.to_string(),"uploadSpeed":"0","numActive":counters.get("numActive").unwrap_or(&0).to_string(),"numWaiting":counters.get("numWaiting").unwrap_or(&0).to_string(),"numStopped":counters.get("numStopped").unwrap_or(&0).to_string()}),
+                json!({"downloadSpeed":speed.to_string(),"uploadSpeed":upload_speed.to_string(),"numActive":counters.get("numActive").unwrap_or(&0).to_string(),"numWaiting":counters.get("numWaiting").unwrap_or(&0).to_string(),"numStopped":counters.get("numStopped").unwrap_or(&0).to_string()}),
             )
         }
         "system.listMethods" => {
             count(params, 0, 0)?;
             Ok(json!([
                 "system.listMethods",
+                "system.multicall",
                 "aria2.addUri",
                 "aria2.addMetalink",
                 "aria2.addTorrent",

@@ -1,6 +1,6 @@
 [package]
 name = "ariai"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Native Rust downloader, working towards aria2 feature parity"
@@ -11,8 +11,10 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+cookie_store = "0.22"
 futures-util = { version = "0.3", features = ["sink"] }
 hex = "0.4"
+httpdate = "1"
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
 md-5 = "0.10"
 percent-encoding = "2"

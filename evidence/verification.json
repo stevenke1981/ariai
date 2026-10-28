@@ -1,5 +1,5 @@
 {
-  "observed_at": "2026-10-28T04:44:06.564319+00:00",
+  "observed_at": "2026-10-28T08:18:49.865966+00:00",
   "platform": "win32",
   "checks": [
     {
@@ -13,7 +13,7 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 0.25,
+      "seconds": 0.26,
       "output": "evidence\\format.log",
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
@@ -26,9 +26,9 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 45.56,
+      "seconds": 49.94,
       "output": "evidence\\tests.log",
-      "sha256": "64d20f8da5dcaf95219a91313b70029e5e18a20332d221b2c136f8c8046f95c8"
+      "sha256": "eb6d81811cf4e728ceb9b4ee5974bd1f64cc2a7b20cb7fea05726e8e4464c527"
     },
     {
       "name": "clippy",
@@ -43,9 +43,9 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 4.7,
+      "seconds": 4.72,
       "output": "evidence\\clippy.log",
-      "sha256": "123435d173a1c14eed314809b6940760bbf829319a5759b812b7adff9e79f95b"
+      "sha256": "e347d9a42b86eb44e50403a60609a6501a5c43afb6a1cd1cd30f57b0e5303960"
     },
     {
       "name": "release",
@@ -57,9 +57,9 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 85.14,
+      "seconds": 52.51,
       "output": "evidence\\release.log",
-      "sha256": "76044f8214825d97c1a03c876e997a918a4024a3a13fc934a69c4fc647899cb6"
+      "sha256": "cea103e187d8534319de1b33a8db2f54fcc97834a025207ef773b4ca566e2625"
     },
     {
       "name": "version",
@@ -69,9 +69,9 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 0.96,
+      "seconds": 0.41,
       "output": "evidence\\version.log",
-      "sha256": "5e133e3e3a000aa01fdabef487805b72ce6780780d33abd54b8d3c0c12fffc24"
+      "sha256": "5e0f5b49ed22a4711fd332fb556422cb7fe33f4a08b98c445f321683ae6bf8f0"
     },
     {
       "name": "cli-smoke",
@@ -84,40 +84,46 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 4.8,
+      "seconds": 2.73,
       "output": "evidence\\cli-smoke.log",
-      "sha256": "e026c803e012158899bc286c2e8cca51ab7569d04ce38b5fcce78280f7ed5a43"
+      "sha256": "97958518dc19e34fa4760be27d925ca4d96bac02c11c745152167363624847cd"
     }
   ],
   "result": "PASS",
   "source_sha256": {
-    "Cargo.toml": "9608336a230587c3ce308c7da487061b3736590f5a9d719a23c7799746e49a73",
-    "Cargo.lock": "6d1605f492041596a9277f7ed0e7626cb71b75bdb75164742b8b08d22269076e",
-    "src\\cli.rs": "4cda4b002f0a15961254df7453826d3c480e2d84c4dce4dae1973ad3fae5f2be",
-    "src\\config.rs": "a0a275e6543c710d81a6884b6d788bb6c1f7745609f0e4d23fd56efa945d5cda",
-    "src\\engine.rs": "17c680a2dd59f41e3c7ee2837db6901930f474daf2e74dd7a9a80d42b976d975",
-    "src\\lib.rs": "9d29b65a90bcad3e3ce41491eed8c99b2739c61a7b14f241f212029be0f65c4a",
+    "Cargo.toml": "f0ba723250839ffa182bd034a9a2f76eacecb09c71ef491d0d9b025b445cc4f4",
+    "Cargo.lock": "9ce8786edc66dfdc45923fe591a9937cf1c9655f71e2b59aca83a3dfd6623548",
+    "src\\cli.rs": "462cb64ff5db8d32dbdae0afacb9d6ce32f319443d67360413de3617526b37f2",
+    "src\\config.rs": "dfd66017c34bdcb3c0a97984751e719225736f0d4a2fdb6fbf38e156ca57b5a8",
+    "src\\engine.rs": "01edeb1aa670d35c87db69a89b0de5430700c5b942c0c92cbb5626013cb4b1c7",
+    "src\\http.rs": "e3368c00d6e178ffe8a2103bb01c6abdb64d9e1c77027de82d6ae23ef2d5480f",
+    "src\\integrity.rs": "64e57f4fd1ea99a0fe45f91ef99ff8c205d2dda5414b7c3edb014df7ee0413e2",
+    "src\\lib.rs": "63f1fa50b2d720a257aca6e23917f1876d4cd46f8a244059e94f8870953d24c5",
     "src\\main.rs": "0e3b1d4a2a9e889ee15ab3e58f1dbb8b68850907898e8871cf37e8dc81a0588a",
-    "src\\manager.rs": "ec3723d05d7144c936a15dfdef1dbfe656a9b0c2758d6107de253064b7567603",
+    "src\\manager.rs": "5dc2c057f3bde06422b56acd363571409370a5c13803d380e8ca1f83693ffe5c",
     "src\\metalink.rs": "d28dcdd02f60a39c81c8f4d7e3ffac8a8fb1080864dcbc22950444f96f46771a",
-    "src\\model.rs": "f43fbf9cfbda5d667380d989e76f6d81dcf98249f8341e03d4a95581788d0cf8",
+    "src\\model.rs": "0d7ba0aa6be3ad085fb72eed712515582ac418f7c8c8749fbcdf9187100336d1",
     "src\\protocols\\ftp.rs": "77ceea50d30359e9119090386331d753c64819ceaa75cc80a85da907327f35f3",
     "src\\protocols\\mod.rs": "589f3736ec6ff63e757d60197bdfcedc1c11873ef27fdd295261fb3a7b95b0f5",
     "src\\protocols\\sftp.rs": "c7522c60a95e333307534fd891d9099ff28b443cfde9a48eb7c53d62df088cd2",
-    "src\\rpc.rs": "9431a5e33704aedc2c76b5b552fd74c4b3c1b0a2799cf68e38690f02af05ff21",
-    "src\\source.rs": "c784cbe215d36245c3d4832eb8cab7492f5bf75be38440b9b7be7c004be9b934",
-    "src\\torrent.rs": "9fb3bcf748f45eef439555566c7dded33694ef805e3a1283a92e86a1c9d03a37",
+    "src\\rpc.rs": "30095e5101251282f51c3258619b1d3c6d7e77094d2f6ce51645341873134bcc",
+    "src\\source.rs": "a1522e95b2e5f6802d1900c3145a0bd03a4a446f24f5960de179093d4139020d",
+    "src\\torrent.rs": "d11b3edf71bb03ee737761647a135ceb0675cd1921a00ae8bb041dc90b16fcd3",
+    "src\\xmlrpc.rs": "23a55f3974b908806404d8733e5f085dd51981c9ff03340bf3a7090fd87362e4",
     "tests\\cli.rs": "3be79f449a5dd6278682151a0bec209a2dbdc5aee6b34b1c0a3ba2a5e6b4c208",
-    "tests\\engine.rs": "9089e0076369b30924ad40d813b970c684d4ea373f784d61d4b1a221ca08258b",
+    "tests\\engine.rs": "8069bc3e6e43716d7f2c4491391f66178b042a9297b89dc4ce79b38de230417b",
+    "tests\\http_auth.rs": "afb4aa6764ddcfdc8b843e78cb61dd78dccbb590d5678ad8da6e862a1aa84e56",
     "tests\\metalink.rs": "1c48958617dfc596edffc479a05beb1f8c3930cb4d68c89a7265aabee83bc038",
-    "tests\\model.rs": "c13e1c69c51c82d936f10a460b992657ab242d15f48739187ed9696046ea88ab",
+    "tests\\model.rs": "f605a1d25af67d945e093db8b410168dc2c65f6ce2859d6e270a616c37e353cc",
     "tests\\remote.rs": "d93ad69ad6b43e6373d84fe7038c7e59d4dc4b56d91dd6b5031f099c84db4d86",
+    "tests\\repair.rs": "4a74b01ea958642485085a365f5169f76db2c11dc400bdf03bd097e5c02acc40",
     "tests\\rpc.rs": "418b1c7f39afedfd1cbca63ab1a7e8f5c763ab645d4a6f8b2953dc7f6d3adccc",
-    "tests\\rpc_extended.rs": "f652caa5d3dada91f408768abe52b830ad9855b6c99c519206d9d2ca8a1f4a99",
-    "tests\\torrent.rs": "ed33a12f71a98d7fdde1d45118a1be2ded3495cbe0f8adb22a45ae74af61173e"
+    "tests\\rpc_extended.rs": "808489e07f7d4bdd3583672c7073480dbb36a54bf3613ce1c67e08fabe352e35",
+    "tests\\torrent.rs": "10fd9ffbd36a5e3e9e14815151777384fba2eb4678fac6b6bb02016bd35ef341",
+    "tests\\xmlrpc.rs": "408ea5b0ac3382a012d7e1d62cfaf0088f3b42f1dee3747c53f71937910407ca"
   },
   "artifact": {
     "path": "C:\\Users\\steven\\AppData\\Local\\ariai-target\\release\\ariai.exe",
-    "sha256": "96f4b28248271d5f0095f618efbac11488a26ad09e80540bddab101d9bbbb0cd"
+    "sha256": "35113abbe7f9408351a77675bef5a72496f55ab2fdb6a2c2013e6d2870dca1d7"
   }
 }

@@ -304,3 +304,39 @@ async fn rpc_torrent_metadata_persists_and_existing_data_is_verified() {
     cancel.cancel();
     data_task.abort();
 }
+
+#[tokio::test]
+async fn multicall_authenticates_each_nested_call() {
+    let (_dir, _manager, rpc_url, _data_url, cancel, data_task) = setup().await;
+    let body = json!({"jsonrpc":"2.0", "id":7, "method":"system.multicall", "params":[[
+        {"methodName":"aria2.getVersion", "params":["token:secret"]},
+        {"methodName":"aria2.getVersion", "params":[]},
+        {"methodName":"system.listMethods", "params":[]},
+        {"methodName":"system.multicall", "params":[[]]},
+        {"methodName":"missing", "params":["token:secret"]},
+        {"methodName":"aria2.getVersion", "params":"bad"}
+    ]]});
+    let response: Value = reqwest::Client::new()
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let result = response["result"].as_array().unwrap();
+    assert!(result[0][0]["version"].is_string());
+    assert_eq!(result[1]["faultString"], "Unauthorized");
+    assert!(
+        result[2][0]
+            .as_array()
+            .unwrap()
+            .contains(&json!("system.multicall"))
+    );
+    assert_eq!(result[3]["faultCode"], -32600);
+    assert_eq!(result[4]["faultCode"], -32601);
+    assert_eq!(result[5]["faultCode"], -32602);
+    cancel.cancel();
+    data_task.abort();
+}

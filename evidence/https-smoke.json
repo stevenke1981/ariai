@@ -1,11 +1,11 @@
 {
   "result": "PASS",
-  "observed_at": "2026-10-28T04:47:00.715569+00:00",
+  "observed_at": "2026-10-28T08:20:50.754224+00:00",
   "url": "https://static.rust-lang.org/dist/channel-rust-stable.toml.sha256",
   "bytes": 91,
   "sha256": "1c00ea822103bdb8db04f5adadb45d928916c00f44dfebf98575ba863bdf5db9",
   "binary": "C:\\Users\\steven\\AppData\\Local\\ariai-target\\release\\ariai.exe",
-  "binary_sha256": "96f4b28248271d5f0095f618efbac11488a26ad09e80540bddab101d9bbbb0cd",
-  "version": "ariai 0.2.0",
+  "binary_sha256": "35113abbe7f9408351a77675bef5a72496f55ab2fdb6a2c2013e6d2870dca1d7",
+  "version": "ariai 0.3.0",
   "tls_verification": "rustls default enabled"
 }

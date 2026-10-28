@@ -54,3 +54,28 @@ Executed validation, using `C:\Users\steven\AppData\Local\ariai-target` througho
 | Full suite, release build, packaged executable acceptance | NOT_RUN by this role | Reserved for the independent verifier after integration. |
 
 Final lightweight self-check: source edits remain limited to the concrete items listed above. The workspace has no `.git` directory, so Git diff is unavailable. RPC torrent files preserve per-file selected/length/completed values through the manager; RPC uploadLength/uploadSpeed/connections remain zero placeholders, and root was notified to document that limitation. This pass does not establish complete aria2 parity, public-network tracker/DHT interoperability, cross-platform runtime behavior, or release/publication status.
+
+## Phase 3 integration - 2026-10-28
+
+Workspace: `Z:\ariai`. Configured role: `gpt-6.1-sol/high`, native integration worker. Workflow: `workflow8d7bf6b60bcf497fb750ebd91112cd66`. Scope: one integration pass against `PLAN-PHASE3.md`, focusing on shared HTTP authentication/cookies, XML-RPC execution/authentication and multicall, measured BitTorrent statistics and seed stopping, manager snapshot propagation, and Metalink streaming repair/publication. No recursive agents or repeated whole-project review were used.
+
+Concrete defect and fix:
+
+- `src/engine.rs`: a fresh download from a truncated first mirror can be extended by successful Metalink piece repair. The engine previously returned the pre-repair assembly length. A deterministic 8-byte first mirror plus 10-byte complete mirror reproduced a 10-byte verified output with `DownloadResult.total_length == 8`. Read the assembly metadata after successful repair so the result and final progress report its actual verified length.
+- `tests/repair.rs`: extended the loopback fixture with a truncated mirror. The regression verifies final bytes, result length, total/completed progress, and that the complete mirror supplies only the missing `bytes=8-9` piece. It failed before the fix (`left: 8`, `right: 10`) and passed afterward.
+- Applied the required `cargo fmt --all` to the shared core. No additional behavior changes were needed in HTTP, XML-RPC, manager, or BitTorrent during this integration pass. Root-owned smoke/package/docs/model-test additions were not edited by this role.
+
+Executed validation, using `C:\Users\steven\AppData\Local\ariai-target` throughout:
+
+| Check | Result | Evidence |
+|---|---|---|
+| Initial combined targeted run: `cargo test --locked --test http_auth --test engine --test xmlrpc --test rpc_extended --test torrent --test repair` | PASS | 26 tests total: HTTP auth 8, engine 5, XML-RPC HTTP 1, extended RPC 4, torrent 7, repair 1. Includes actual loopback Digest/cookies, token/multicall HTTP and WebSocket behavior, controlled-peer upload/download throttling and statistics, tracker discovery, selective repair and malformed-range/cancellation checks. |
+| New truncated-mirror regression before fix | EXPECTED FAIL | `cargo test --locked --test repair` failed at the final result-length assertion: reported 8 instead of 10. Output bytes had already verified as correct. |
+| `cargo test --locked --test repair --test engine` after the fix | PASS | Repair 1 and engine 5, no failures. Includes the added truncated-source length/progress regression. |
+| `cargo fmt --all -- --check` after the fix | PASS | Exit 0, no diagnostics. |
+| `cargo clippy --locked --all-targets -- -D warnings` after the fix | PASS | Exit 0; no warnings or errors. |
+| Final scoped diff whitespace check | PASS with Windows CRLF setting | `git -c safe.directory=Z:/ariai -c core.whitespace=cr-at-eol diff --check` exited 0. The plain check flagged CRLF as trailing whitespace in torrent source/tests and option coverage; no source changes were made for those line-ending-only reports. |
+| Full locked suite, release build, executable smoke, portable package | NOT_RUN by this role | Reserved for the independent executable workflow verifier and root after this integration completes. |
+| Public swarm, live Internet Digest/Cookie hosts, cross-platform runtime | NOT_RUN by this role | Loopback evidence does not establish these environments. |
+
+Final scoped Git inspection is available with `git -c safe.directory=Z:/ariai ...`; the initial unscoped invocation did not recognize the SMB-mounted checkout. This corrects the earlier integration notes' unverified no-repository assumption for the current checkout. No commit, push, release, or deployment is claimed by this role. Core source and tests are stable for independent acceptance.

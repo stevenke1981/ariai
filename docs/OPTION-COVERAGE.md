@@ -1,8 +1,8 @@
-# ariai 0.2.0 選項受理對照
+# ariai 0.3.0 選項受理對照
 
 由 tools/option_coverage.py 依本次執行檔 --help 與上游選項盤點產生。這只表示 CLI 有受理旗標，不表示語義完整相容或每個選項已實測；範圍和差異見 [功能矩陣](FEATURES.md)。
 
-上游盤點 197 項，其中 44 項出現在本次 CLI help。這不是功能完成百分比。
+上游盤點 197 項，其中 50 項出現在本次 CLI help。這不是功能完成百分比。
 
 | 上游選項 | ariai CLI |
 |---|---|
@@ -81,7 +81,7 @@
 
 | `--check-certificate` | 待補 |
 
-| `--check-integrity` | 待補 |
+| `--check-integrity` | 已受理，語義見功能矩陣 |
 
 | `--checksum` | 已受理，語義見功能矩陣 |
 
@@ -181,7 +181,7 @@
 
 | `--http-accept-gzip` | 待補 |
 
-| `--http-auth-challenge` | 待補 |
+| `--http-auth-challenge` | 已受理，語義見功能矩陣 |
 
 | `--http-no-cache` | 待補 |
 
@@ -213,7 +213,7 @@
 
 | `--listen-port` | 已受理，語義見功能矩陣 |
 
-| `--load-cookies` | 待補 |
+| `--load-cookies` | 已受理，語義見功能矩陣 |
 
 | `--log` | 待補 |
 
@@ -241,7 +241,7 @@
 
 | `--max-tries` | 已受理，語義見功能矩陣 |
 
-| `--max-upload-limit` | 待補 |
+| `--max-upload-limit` | 已受理，語義見功能矩陣 |
 
 | `--metalink-base-uri` | 待補 |
 
@@ -347,7 +347,7 @@
 
 | `--rpc-user` | 待補 |
 
-| `--save-cookies` | 待補 |
+| `--save-cookies` | 已受理，語義見功能矩陣 |
 
 | `--save-not-found` | 待補 |
 
@@ -355,7 +355,7 @@
 
 | `--save-session-interval` | 待補 |
 
-| `--seed-ratio` | 待補 |
+| `--seed-ratio` | 已受理，語義見功能矩陣 |
 
 | `--seed-time` | 已受理，語義見功能矩陣 |
 

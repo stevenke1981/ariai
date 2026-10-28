@@ -21,8 +21,13 @@ pub struct DownloadOptions {
     pub proxy: Option<String>,
     pub http_user: Option<String>,
     pub http_passwd: Option<String>,
+    pub http_auth_challenge: bool,
+    pub load_cookies: Option<PathBuf>,
+    pub save_cookies: Option<PathBuf>,
     pub checksum: Option<String>,
     pub max_download_limit: u64,
+    pub max_upload_limit: u64,
+    pub check_integrity: bool,
     pub allow_overwrite: bool,
     pub auto_file_renaming: bool,
     pub ftp_user: Option<String>,
@@ -38,6 +43,8 @@ pub struct DownloadOptions {
     pub bt_enable_dht: bool,
     pub bt_listen_port: Option<u16>,
     pub seed_time_secs: u64,
+    pub seed_time_explicit: bool,
+    pub seed_ratio: Option<f64>,
     pub follow_torrent: bool,
     pub follow_metalink: bool,
     pub expected_length: Option<u64>,
@@ -69,8 +76,13 @@ impl Default for DownloadOptions {
             proxy: None,
             http_user: None,
             http_passwd: None,
+            http_auth_challenge: false,
+            load_cookies: None,
+            save_cookies: None,
             checksum: None,
             max_download_limit: 0,
+            max_upload_limit: 0,
+            check_integrity: false,
             allow_overwrite: false,
             auto_file_renaming: true,
             ftp_user: None,
@@ -86,6 +98,8 @@ impl Default for DownloadOptions {
             bt_enable_dht: true,
             bt_listen_port: None,
             seed_time_secs: 0,
+            seed_time_explicit: false,
+            seed_ratio: None,
             follow_torrent: true,
             follow_metalink: true,
             expected_length: None,
@@ -96,6 +110,12 @@ impl Default for DownloadOptions {
 
 impl DownloadOptions {
     pub fn validate(&self) -> Result<()> {
+        if let Some(ratio) = self.seed_ratio {
+            ensure!(
+                ratio.is_finite() && ratio >= 0.0,
+                "seed-ratio must be finite and nonnegative"
+            );
+        }
         ensure!(
             (1..=64).contains(&self.split),
             "split must be between 1 and 64"
@@ -237,6 +257,12 @@ pub struct DownloadProgress {
     pub total_length: Option<u64>,
     pub completed_length: u64,
     pub download_speed: u64,
+    #[serde(default)]
+    pub upload_length: u64,
+    #[serde(default)]
+    pub upload_speed: u64,
+    #[serde(default)]
+    pub connections: u64,
     pub path: Option<PathBuf>,
     pub files: Vec<DownloadFile>,
 }
@@ -276,6 +302,12 @@ pub struct DownloadSnapshot {
     pub total_length: Option<u64>,
     pub completed_length: u64,
     pub download_speed: u64,
+    #[serde(default)]
+    pub upload_length: u64,
+    #[serde(default)]
+    pub upload_speed: u64,
+    #[serde(default)]
+    pub connections: u64,
     pub path: Option<PathBuf>,
     pub error: Option<String>,
     pub files: Vec<DownloadFile>,

@@ -115,6 +115,9 @@ impl DownloadManager {
                 total_length: None,
                 completed_length: 0,
                 download_speed: 0,
+                upload_length: 0,
+                upload_speed: 0,
+                connections: 0,
                 path: None,
                 error: None,
                 files: Vec::new(),
@@ -166,6 +169,9 @@ impl DownloadManager {
                     entry.snapshot.path = progress.path;
                     entry.snapshot.files = progress.files;
                     entry.snapshot.download_speed = 0;
+                    entry.snapshot.upload_length = progress.upload_length;
+                    entry.snapshot.upload_speed = 0;
+                    entry.snapshot.connections = 0;
                     if entry.snapshot.status == DownloadStatus::Active {
                         match result {
                             Ok(result) => {
@@ -201,6 +207,9 @@ impl DownloadManager {
             snapshot.total_length = p.total_length;
             snapshot.completed_length = p.completed_length;
             snapshot.download_speed = p.download_speed;
+            snapshot.upload_length = p.upload_length;
+            snapshot.upload_speed = p.upload_speed;
+            snapshot.connections = p.connections;
             snapshot.path = p.path.clone();
             snapshot.files = p.files.clone();
         }

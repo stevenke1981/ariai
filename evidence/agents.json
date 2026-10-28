@@ -1,18 +1,42 @@
-﻿{
-  "workflow_id": "3b06733f9fdc4b08b94922006b3ee76b",
-  "previous_workflow_id": "2d554898c1a2468f8456ef51eac6cbeb",
+{
+  "workflow_id": "8d7bf6b60bcf497fb750ebd91112cd66",
+  "previous_workflow_id": "3b06733f9fdc4b08b94922006b3ee76b",
   "provenance": "Native Host reported role/model configuration and tool execution, not provider wire-model attestation",
-  "coordinator": {"agent_id": "/root/luna_phase2", "model": "gpt-6-luna", "effort": "medium"},
+  "coordinator": {
+    "agent_id": "/root/luna_phase2",
+    "model": "gpt-6-luna",
+    "effort": "medium"
+  },
   "workers": [
-    {"agent_id": "/root/remote_phase2", "task": "remote", "model": "gpt-6.1-terra", "effort": "xhigh", "dispatch_id": "3fd015c836f049afa5d7c81658e9cdb8"},
-    {"agent_id": "/root/metalink_phase2", "task": "metalink", "model": "gpt-6.1-terra", "effort": "xhigh", "dispatch_id": "300afae466084508b8d0151e0601d2cc"},
-    {"agent_id": "/root/torrent_phase2", "task": "torrent", "model": "gpt-6.1-terra", "effort": "xhigh", "dispatch_id": "09bf1c31afe54cf39eea2a7fd02f16c3"}
+    {
+      "agent_id": "/root/http_phase3",
+      "task": "http",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "dispatch_id": "f77e83b65ce84918a9814aa1c3d7450e"
+    },
+    {
+      "agent_id": "/root/rpc_phase3",
+      "task": "rpc",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "dispatch_id": "dd1b1936b2d843c5b38c51e0871de3e4"
+    },
+    {
+      "agent_id": "/root/torrent_phase3",
+      "task": "torrent",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "dispatch_id": "6c67fd075bff4ab1a18aa442fc476046"
+    }
   ],
-  "integrator": {"agent_id": "/root/integration_phase2", "model": "gpt-6.1-sol", "effort": "high"},
+  "integrator": {
+    "agent_id": "/root/integration_phase3",
+    "model": "gpt-6.1-sol",
+    "effort": "high"
+  },
   "notes": [
-    "Root integrated CLI/config, HTTP/native protocol dispatch, shared verification, per-file snapshots, queue changes and RPC/WebSocket.",
-    "Worker completion and role/model labels are not independent acceptance; current actual verification receipt is separate.",
-    "All Cargo jobs use the same explicit workspace and local CARGO_TARGET_DIR to avoid network-disk artifact collisions.",
-    "A Windows debug executable lock during concurrent smoke/integration was resolved after the owned smoke process completed; no unrelated process was terminated."
+    "Worker completion, integration and independent executed verification are separate events.",
+    "Root implemented shared options and state, selective Metalink repair, CLI integration and release smoke."
   ]
 }

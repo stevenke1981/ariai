@@ -26,8 +26,13 @@ const DOWNLOAD_OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("http-proxy", None, false),
     ("http-user", None, false),
     ("http-passwd", None, false),
+    ("http-auth-challenge", None, true),
+    ("load-cookies", None, false),
+    ("save-cookies", None, false),
     ("checksum", None, false),
     ("max-download-limit", None, false),
+    ("max-upload-limit", Some('u'), false),
+    ("check-integrity", Some('V'), true),
     ("allow-overwrite", None, true),
     ("auto-file-renaming", None, true),
     ("ftp-user", None, false),
@@ -43,6 +48,7 @@ const DOWNLOAD_OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("enable-dht", None, true),
     ("listen-port", None, false),
     ("seed-time", None, false),
+    ("seed-ratio", None, false),
     ("follow-torrent", None, true),
     ("follow-metalink", None, true),
 ];
@@ -100,7 +106,14 @@ impl Settings {
 fn command() -> Command {
     let mut command = Command::new("ariai")
         .version(env!("CARGO_PKG_VERSION"))
+        .disable_version_flag(true)
         .about("Native multi-protocol downloader: HTTP(S), FTP, SFTP, BitTorrent, Metalink")
+        .arg(
+            Arg::new("version")
+                .long("version")
+                .short('v')
+                .action(ArgAction::Version),
+        )
         .arg(Arg::new("conf-path").long("conf-path").value_name("FILE"))
         .arg(
             Arg::new("uri")

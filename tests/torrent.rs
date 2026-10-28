@@ -288,3 +288,388 @@ async fn invalid_metadata_selection_and_cancellation() {
     assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     stalled_task.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn measured_seeding_ratio_and_limits_with_real_peer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bytes = vec![b'x'; 8 * 16384];
+    let mut info = b"d6:lengthi131072e4:name7:big.bin12:piece lengthi16384e6:pieces160:".to_vec();
+    for chunk in bytes.chunks(16384) {
+        info.extend(Sha1::digest(chunk));
+    }
+    info.push(b'e');
+    let mut metadata = b"d4:info".to_vec();
+    metadata.extend(info);
+    metadata.push(b'e');
+    let torrent_path = tmp.path().join("big.torrent");
+    tokio::fs::write(&torrent_path, metadata).await.unwrap();
+    let seed_dir = tmp.path().join("seed");
+    tokio::fs::create_dir_all(&seed_dir).await.unwrap();
+    tokio::fs::write(seed_dir.join("big.bin"), &bytes)
+        .await
+        .unwrap();
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let (tx, mut rx) = watch::channel(DownloadProgress::default());
+    let seed_request = DownloadRequest {
+        uris: vec![torrent_path.to_string_lossy().to_string()],
+        options: DownloadOptions {
+            dir: seed_dir,
+            bt_enable_dht: false,
+            bt_listen_port: Some(port),
+            allow_overwrite: true,
+            max_upload_limit: 16384,
+            seed_ratio: Some(1.0),
+            seed_time_secs: 30,
+            ..Default::default()
+        },
+    };
+    let seed_task = tokio::spawn(torrent::download(
+        seed_request,
+        CancellationToken::new(),
+        tx,
+    ));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while rx.borrow().completed_length != bytes.len() as u64 {
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("seed did not initialize");
+    let monitor = tokio::spawn(async move {
+        let mut peak_connections = 0;
+        let mut peak_upload_speed = 0;
+        let mut uploaded = 0;
+        loop {
+            {
+                let p = rx.borrow_and_update();
+                peak_connections = peak_connections.max(p.connections);
+                peak_upload_speed = peak_upload_speed.max(p.upload_speed);
+                uploaded = uploaded.max(p.upload_length);
+            }
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+        (peak_connections, peak_upload_speed, uploaded)
+    });
+    let (tx, _) = watch::channel(DownloadProgress::default());
+    let start = tokio::time::Instant::now();
+    let peer = tokio::time::timeout(
+        Duration::from_secs(25),
+        torrent::download(
+            DownloadRequest {
+                uris: vec![torrent_path.to_string_lossy().to_string()],
+                options: DownloadOptions {
+                    dir: tmp.path().join("peer"),
+                    bt_enable_dht: false,
+                    bt_initial_peers: vec![format!("127.0.0.1:{port}")],
+                    ..Default::default()
+                },
+            },
+            CancellationToken::new(),
+            tx,
+        ),
+    )
+    .await
+    .expect("peer timed out")
+    .unwrap();
+    assert_eq!(tokio::fs::read(peer.path).await.unwrap(), bytes);
+    assert!(
+        start.elapsed() >= Duration::from_secs(4),
+        "limits did not throttle transfer: {:?}",
+        start.elapsed()
+    );
+    tokio::time::timeout(Duration::from_secs(5), seed_task)
+        .await
+        .expect("seed ratio did not stop")
+        .unwrap()
+        .unwrap();
+    let (connections, speed, uploaded) = monitor.await.unwrap();
+    assert!(connections > 0, "no live connection reported");
+    assert!(speed > 0, "no upload speed reported");
+    assert!(uploaded >= bytes.len() as u64, "reported upload {uploaded}");
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seed_zero_ratio_waits_and_explicit_zero_time_stops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (metadata, _, a, b) = fixture();
+    let torrent_path = tmp.path().join("fixture.torrent");
+    tokio::fs::write(&torrent_path, metadata).await.unwrap();
+    let dir = tmp.path().join("seed");
+    tokio::fs::create_dir_all(dir.join("bundle")).await.unwrap();
+    tokio::fs::write(dir.join("bundle/a.txt"), a).await.unwrap();
+    tokio::fs::write(dir.join("bundle/b.txt"), b).await.unwrap();
+    let mut options = DownloadOptions {
+        dir,
+        bt_enable_dht: false,
+        allow_overwrite: true,
+        seed_ratio: Some(0.0),
+        ..Default::default()
+    };
+    let (tx, mut rx) = watch::channel(DownloadProgress::default());
+    let cancel = CancellationToken::new();
+    let request = DownloadRequest {
+        uris: vec![torrent_path.to_string_lossy().to_string()],
+        options: options.clone(),
+    };
+    let mut task = tokio::spawn(torrent::download(request, cancel.clone(), tx));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while rx.borrow().completed_length != 32768 {
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(600), &mut task)
+            .await
+            .is_err()
+    );
+    cancel.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    options.seed_time_explicit = true;
+    let (tx, _) = watch::channel(DownloadProgress::default());
+    let request = DownloadRequest {
+        uris: vec![torrent_path.to_string_lossy().to_string()],
+        options: options.clone(),
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        torrent::download(request, CancellationToken::new(), tx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    options.seed_time_secs = 1;
+    options.seed_ratio = Some(100.0);
+    let (tx, _) = watch::channel(DownloadProgress::default());
+    let request = DownloadRequest {
+        uris: vec![torrent_path.to_string_lossy().to_string()],
+        options,
+    };
+    let start = tokio::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        torrent::download(request, CancellationToken::new(), tx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(start.elapsed() >= Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn rejects_unsupported_torrent_rate_boundaries() {
+    for (download, upload) in [
+        (1, 0),
+        (16383, 0),
+        (u32::MAX as u64 + 1, 0),
+        (0, 1),
+        (0, u32::MAX as u64 + 1),
+    ] {
+        let (tx, _) = watch::channel(DownloadProgress::default());
+        let request = DownloadRequest {
+            uris: vec!["missing.torrent".into()],
+            options: DownloadOptions {
+                max_download_limit: download,
+                max_upload_limit: upload,
+                ..Default::default()
+            },
+        };
+        let err = torrent::download(request, CancellationToken::new(), tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("between 16384 and"), "{err:#}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovers_seed_through_loopback_http_tracker() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let seed_dir = tmp.path().join("seed");
+    tokio::fs::create_dir_all(seed_dir.join("bundle"))
+        .await
+        .unwrap();
+    let (metadata, _, a, b) = fixture();
+    tokio::fs::write(seed_dir.join("bundle/a.txt"), a)
+        .await
+        .unwrap();
+    tokio::fs::write(seed_dir.join("bundle/b.txt"), &b)
+        .await
+        .unwrap();
+    let session = Session::new_with_opts(
+        seed_dir,
+        SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            listen: Some(ListenerOptions {
+                listen_addr: ([127, 0, 0, 1], 0).into(),
+                ipv4_only: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let seed = session
+        .add_torrent(
+            AddTorrent::from_bytes(metadata.clone()),
+            Some(AddTorrentOptions {
+                overwrite: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_handle()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), seed.wait_until_completed())
+        .await
+        .unwrap()
+        .unwrap();
+    let seed_port = session.listen_addr().unwrap().port();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tracker_addr = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tracker_calls = calls.clone();
+    let app = axum::Router::new().route(
+        "/announce",
+        axum::routing::get(move || {
+            let tracker_calls = tracker_calls.clone();
+            async move {
+                tracker_calls.fetch_add(1, Ordering::SeqCst);
+                let mut response = b"d8:intervali60e5:peers6:".to_vec();
+                response.extend([127, 0, 0, 1]);
+                response.extend(seed_port.to_be_bytes());
+                response.push(b'e');
+                response
+            }
+        }),
+    );
+    let tracker_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let announce = format!("http://{tracker_addr}/announce");
+    let mut tracked = format!("d8:announce{}:{}", announce.len(), announce).into_bytes();
+    tracked.extend(&metadata[1..]);
+    let path = tmp.path().join("tracked.torrent");
+    tokio::fs::write(&path, tracked).await.unwrap();
+    let (tx, _) = watch::channel(DownloadProgress::default());
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        torrent::download(
+            DownloadRequest {
+                uris: vec![path.to_string_lossy().to_string()],
+                options: DownloadOptions {
+                    dir: tmp.path().join("download"),
+                    bt_enable_dht: false,
+                    select_file: Some("2".into()),
+                    ..Default::default()
+                },
+            },
+            CancellationToken::new(),
+            tx,
+        ),
+    )
+    .await
+    .expect("HTTP tracker transfer timed out")
+    .unwrap();
+    assert_eq!(tokio::fs::read(result.path.join("b.txt")).await.unwrap(), b);
+    assert!(calls.load(Ordering::SeqCst) > 0);
+    tracker_task.abort();
+    session.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_limit_throttles_transfer_from_unrestricted_peer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bytes = vec![b'y'; 8 * 16384];
+    let mut info = b"d6:lengthi131072e4:name7:big.bin12:piece lengthi16384e6:pieces160:".to_vec();
+    for chunk in bytes.chunks(16384) {
+        info.extend(Sha1::digest(chunk));
+    }
+    info.push(b'e');
+    let mut metadata = b"d4:info".to_vec();
+    metadata.extend(info);
+    metadata.push(b'e');
+    let dir = tmp.path().join("seed");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("big.bin"), &bytes).await.unwrap();
+    let session = Session::new_with_opts(
+        dir,
+        SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            listen: Some(ListenerOptions {
+                listen_addr: ([127, 0, 0, 1], 0).into(),
+                ipv4_only: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = session
+        .add_torrent(
+            AddTorrent::from_bytes(metadata.clone()),
+            Some(AddTorrentOptions {
+                overwrite: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_handle()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_until_completed())
+        .await
+        .unwrap()
+        .unwrap();
+    let torrent_path = tmp.path().join("big.torrent");
+    tokio::fs::write(&torrent_path, metadata).await.unwrap();
+    let (tx, _) = watch::channel(DownloadProgress::default());
+    let started = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        torrent::download(
+            DownloadRequest {
+                uris: vec![torrent_path.to_string_lossy().to_string()],
+                options: DownloadOptions {
+                    dir: tmp.path().join("peer"),
+                    bt_enable_dht: false,
+                    bt_initial_peers: vec![session.listen_addr().unwrap().to_string()],
+                    max_download_limit: 32768,
+                    ..Default::default()
+                },
+            },
+            CancellationToken::new(),
+            tx,
+        ),
+    )
+    .await
+    .expect("download-limited peer timed out")
+    .unwrap();
+    assert_eq!(tokio::fs::read(result.path).await.unwrap(), bytes);
+    assert!(
+        started.elapsed() >= Duration::from_secs(2),
+        "download limit did not throttle transfer: {:?}",
+        started.elapsed()
+    );
+    session.stop().await;
+}

@@ -26,6 +26,7 @@ files = {
     root / "LICENSE": "LICENSE",
     root / "PLAN.md": "PLAN.md",
     root / "PLAN-PHASE2.md": "PLAN-PHASE2.md",
+    root / "PLAN-PHASE3.md": "PLAN-PHASE3.md",
     root / "SPEC.md": "SPEC.md",
     root / "docs" / "FEATURES.md": "docs/FEATURES.md",
     root / "docs" / "OPTION-COVERAGE.md": "docs/OPTION-COVERAGE.md",

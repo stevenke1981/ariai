@@ -1,9 +1,10 @@
+use crate::http::HttpSession;
 use crate::model::{DownloadProgress, DownloadRequest, DownloadResult};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures_util::{StreamExt, future::join_all};
 use reqwest::{
-    Client, Response, StatusCode,
-    header::{CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE, REFERER},
+    Method, Response, StatusCode,
+    header::{CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -52,7 +53,7 @@ struct Checkpoint {
 }
 #[derive(Clone)]
 struct Shared {
-    client: Client,
+    client: HttpSession,
     request: DownloadRequest,
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
@@ -94,17 +95,14 @@ async fn send(
     range: Option<(u64, u64)>,
     validator: Option<&str>,
 ) -> Result<Response> {
-    let mut builder = shared.client.get(url);
+    let mut builder = shared.client.request(Method::GET, url);
     if let Some((start, end)) = range {
         builder = builder.header(RANGE, format!("bytes={start}-{end}"));
     }
     if let Some(value) = validator {
         builder = builder.header(IF_RANGE, value);
     }
-    if let Some(user) = &shared.request.options.http_user {
-        builder = builder.basic_auth(user, shared.request.options.http_passwd.as_ref());
-    }
-    tokio::select! { _ = shared.cancel.cancelled() => bail!("download cancelled"), response = builder.send() => Ok(response?) }
+    tokio::select! { _ = shared.cancel.cancelled() => bail!("download cancelled"), response = shared.client.send(builder) => response }
 }
 async fn update(shared: &Shared, bytes: u64) -> Result<()> {
     let mut state = shared.state.lock().await;
@@ -302,26 +300,28 @@ async fn download_http(
 ) -> Result<DownloadResult> {
     request.validate()?;
     let options = &request.options;
-    let mut headers = reqwest::header::HeaderMap::new();
-    for line in &options.headers {
-        let (name, value) = line.split_once(':').context("invalid header")?;
-        headers.append(
-            reqwest::header::HeaderName::from_bytes(name.trim().as_bytes())?,
-            reqwest::header::HeaderValue::from_str(value.trim())?,
-        );
+    let client = HttpSession::new(options)?;
+    let result = download_http_inner(request.clone(), cancel, progress, client.clone()).await;
+    let saved = client.save_cookies().await;
+    match result {
+        Ok(result) => {
+            saved?;
+            Ok(result)
+        }
+        Err(error) => {
+            saved?;
+            Err(error)
+        }
     }
-    if let Some(referer) = &options.referer {
-        headers.insert(REFERER, referer.parse()?);
-    }
-    let mut builder = Client::builder()
-        .default_headers(headers)
-        .user_agent(&options.user_agent)
-        .timeout(Duration::from_secs(options.timeout_secs))
-        .connect_timeout(Duration::from_secs(options.connect_timeout_secs));
-    if let Some(proxy) = &options.proxy {
-        builder = builder.proxy(reqwest::Proxy::all(proxy)?);
-    }
-    let client = builder.build()?;
+}
+
+async fn download_http_inner(
+    request: DownloadRequest,
+    cancel: CancellationToken,
+    progress: watch::Sender<DownloadProgress>,
+    client: HttpSession,
+) -> Result<DownloadResult> {
+    let options = &request.options;
     let name = match &options.out {
         Some(out) => out.clone(),
         None => {
@@ -351,6 +351,21 @@ async fn download_http(
     let mut target = options.dir.join(name);
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
+    }
+    if options.check_integrity && options.piece_hashes.is_some() && target.exists() {
+        crate::integrity::repair_file(&target, &request, &client, &cancel, &progress).await?;
+        let length = tokio::fs::metadata(&target).await?.len();
+        progress.send_modify(|p| {
+            p.path = Some(target.clone());
+            p.completed_length = length;
+            p.total_length = Some(length);
+            p.download_speed = 0;
+        });
+        return Ok(DownloadResult {
+            files: Vec::new(),
+            path: target,
+            total_length: length,
+        });
     }
     if target.exists() && !options.allow_overwrite {
         ensure!(
@@ -588,10 +603,15 @@ async fn download_http(
     if let Some(expected) = total {
         ensure!(written == expected, "assembled length mismatch");
     }
-    if let Err(err) = crate::protocols::verify_file(&assembled, options).await {
+    let repaired =
+        crate::integrity::repair_file(&assembled, &request, &shared.client, &cancel, &progress)
+            .await;
+    progress.send_modify(|p| p.path = Some(target.clone()));
+    if let Err(err) = repaired {
         let _ = tokio::fs::remove_file(&assembled).await;
         return Err(err);
     }
+    let written = tokio::fs::metadata(&assembled).await?.len();
     ensure!(!cancel.is_cancelled(), "download cancelled");
     if target.exists() {
         ensure!(options.allow_overwrite, "output already exists");

@@ -1,10 +1,11 @@
 //! Native BitTorrent downloads. `out` is ignored for torrents; metadata names files.
 //! By default seeding stops immediately after verification (`seed_time_secs = 0`).
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, num::NonZeroU32, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use librqbit::{
     AddTorrent, AddTorrentOptions, DhtSessionConfig, ListenerOptions, Session, SessionOptions,
+    limits::LimitsConfig,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -28,10 +29,23 @@ pub async fn download(
         options.proxy.is_none(),
         "proxy is not supported for BitTorrent"
     );
-    ensure!(
-        options.max_download_limit == 0,
-        "max-download-limit is not supported for BitTorrent"
-    );
+    // librqbit uses a token bucket whose burst equals its per-second rate.
+    // Its standard requests are 16 KiB, and a smaller burst rejects a request.
+    let limit = |value: u64, name: &str| -> Result<Option<NonZeroU32>> {
+        if value == 0 {
+            return Ok(None);
+        }
+        ensure!(
+            (16_384..=u32::MAX as u64).contains(&value),
+            "BitTorrent {name} must be 0 (unlimited) or between 16384 and {} bytes/s",
+            u32::MAX
+        );
+        Ok(NonZeroU32::new(value as u32))
+    };
+    let ratelimits = LimitsConfig {
+        download_bps: limit(options.max_download_limit, "max-download-limit")?,
+        upload_bps: limit(options.max_upload_limit, "max-upload-limit")?,
+    };
     ensure!(
         options.checksum.is_none()
             && options.expected_length.is_none()
@@ -69,6 +83,7 @@ pub async fn download(
         }),
         listen,
         trackers,
+        ratelimits,
         cancellation_token: Some(session_cancel.clone()),
         disable_local_service_discovery: true,
         ..Default::default()
@@ -114,28 +129,48 @@ pub async fn download(
             (path, total, files)
         })?;
         let mut interval = tokio::time::interval(Duration::from_millis(250));
+        let mut completed_at = None;
+        let mut publish = || {
+            let stats = handle.stats();
+            for (file, completed) in files.iter_mut().zip(&stats.file_progress) {
+                file.completed_length = *completed;
+            }
+            let completed_length = files.iter().filter(|file| file.selected).map(|file| file.completed_length).sum();
+            let (download_speed, upload_speed, connections) = stats.live.as_ref().map_or((0, 0, 0), |live| {
+                (live.download_speed.as_bytes(), live.upload_speed.as_bytes(), u64::from(live.snapshot.peer_stats.live))
+            });
+            progress.send_replace(DownloadProgress {
+                total_length: Some(total_length), completed_length, download_speed,
+                upload_length: stats.uploaded_bytes, upload_speed, connections,
+                path: Some(path.clone()), files: files.clone(),
+            });
+            stats.uploaded_bytes
+        };
         loop {
-            tokio::select! {
-                _ = cancel.cancelled() => bail!("download cancelled"),
-                result = handle.wait_until_completed() => { result?; break; }
-                _ = interval.tick() => {
-                    let stats = handle.stats();
-                    for (file, completed) in files.iter_mut().zip(&stats.file_progress) { file.completed_length = *completed; }
-                    let completed_length = files.iter().filter(|file| file.selected).map(|file| file.completed_length).sum();
-                    progress.send_replace(DownloadProgress { total_length: Some(total_length), completed_length, download_speed: stats.live.map_or(0, |s| s.download_speed.as_bytes()), path: Some(path.clone()), files: files.clone() });
+            let cancelled = tokio::select! {
+                _ = cancel.cancelled() => true,
+                result = handle.wait_until_completed(), if completed_at.is_none() => {
+                    result?;
+                    completed_at = Some(tokio::time::Instant::now());
+                    false
+                }
+                _ = interval.tick() => false,
+            };
+            let uploaded = publish();
+            if cancelled {
+                bail!("download cancelled");
+            }
+            if let Some(started) = completed_at {
+                let explicit_no_seed = options.seed_time_explicit && options.seed_time_secs == 0;
+                let default_no_seed = options.seed_time_secs == 0 && options.seed_ratio.is_none();
+                let time_reached = options.seed_time_secs > 0 && started.elapsed() >= Duration::from_secs(options.seed_time_secs);
+                let ratio_reached = options.seed_ratio.is_some_and(|ratio| ratio > 0.0 && uploaded as f64 >= total_length as f64 * ratio);
+                if explicit_no_seed || default_no_seed || time_reached || ratio_reached {
+                    break;
                 }
             }
         }
-        let stats = handle.stats();
-        for (file, completed) in files.iter_mut().zip(&stats.file_progress) { file.completed_length = *completed; }
-        let completed_length = files.iter().filter(|file| file.selected).map(|file| file.completed_length).sum();
-        progress.send_replace(DownloadProgress { total_length: Some(total_length), completed_length, download_speed: 0, path: Some(path.clone()), files: files.clone() });
-        if options.seed_time_secs > 0 {
-            tokio::select! {
-                _ = cancel.cancelled() => bail!("download cancelled"),
-                _ = tokio::time::sleep(Duration::from_secs(options.seed_time_secs)) => {}
-            }
-        }
+        drop(publish);
         Ok(DownloadResult { path, total_length, files })
     }.await;
     session.stop().await;

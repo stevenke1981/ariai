@@ -1,6 +1,8 @@
 pub mod cli;
 pub mod config;
 pub mod engine;
+pub mod http;
+pub mod integrity;
 pub mod manager;
 pub mod metalink;
 pub mod model;
@@ -8,3 +10,4 @@ pub mod protocols;
 pub mod rpc;
 pub mod source;
 pub mod torrent;
+mod xmlrpc;

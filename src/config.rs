@@ -19,8 +19,13 @@ pub fn apply_option(options: &mut DownloadOptions, key: &str, value: &str) -> Re
         "all-proxy" | "http-proxy" => options.proxy = Some(value.into()),
         "http-user" => options.http_user = Some(value.into()),
         "http-passwd" => options.http_passwd = Some(value.into()),
+        "http-auth-challenge" => options.http_auth_challenge = parse_bool(value)?,
+        "load-cookies" => options.load_cookies = Some(value.into()),
+        "save-cookies" => options.save_cookies = Some(value.into()),
         "checksum" => options.checksum = Some(value.into()),
         "max-download-limit" => options.max_download_limit = parse_size(value)?,
+        "max-upload-limit" => options.max_upload_limit = parse_size(value)?,
+        "check-integrity" => options.check_integrity = parse_bool(value)?,
         "allow-overwrite" => options.allow_overwrite = parse_bool(value)?,
         "auto-file-renaming" => options.auto_file_renaming = parse_bool(value)?,
         "ftp-user" => options.ftp_user = Some(value.into()),
@@ -52,7 +57,9 @@ pub fn apply_option(options: &mut DownloadOptions, key: &str, value: &str) -> Re
                 "invalid seed-time"
             );
             options.seed_time_secs = (minutes * 60.0) as u64;
+            options.seed_time_explicit = true;
         }
+        "seed-ratio" => options.seed_ratio = Some(value.parse()?),
         "follow-torrent" => options.follow_torrent = parse_bool(value)?,
         "follow-metalink" => options.follow_metalink = parse_bool(value)?,
         _ => bail!("unsupported option: {key}"),

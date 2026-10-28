@@ -54,3 +54,21 @@ fn reject_output_traversal_and_header_injection() {
         .is_err()
     );
 }
+
+#[test]
+fn phase3_options_validate_and_old_sessions_keep_defaults() {
+    use ariai::config::apply_option;
+    let mut options: DownloadOptions = serde_json::from_str("{}").unwrap();
+    assert!(!options.seed_time_explicit);
+    assert_eq!(options.seed_ratio, None);
+    apply_option(&mut options, "seed-time", "0").unwrap();
+    assert!(options.seed_time_explicit);
+    apply_option(&mut options, "max-upload-limit", "32K").unwrap();
+    assert_eq!(options.max_upload_limit, 32768);
+    apply_option(&mut options, "seed-ratio", "0").unwrap();
+    options.validate().unwrap();
+    for value in ["NaN", "inf", "-1"] {
+        apply_option(&mut options, "seed-ratio", value).unwrap();
+        assert!(options.validate().is_err());
+    }
+}

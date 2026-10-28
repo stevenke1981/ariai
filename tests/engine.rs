@@ -190,6 +190,19 @@ async fn cancel_then_resume_and_changed_validator_restart() {
         .unwrap();
         assert!(handle.await.unwrap().is_err());
         assert!(dir.path().join("result.bin.ariai").exists());
+        let checkpoint: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(dir.path().join("result.bin.ariai"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let saved: Vec<u64> = checkpoint["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|size| size.as_u64().unwrap())
+            .collect();
+        assert!(saved.iter().sum::<u64>() >= 4096);
         if changed {
             *server.etag.lock().unwrap() = "\"v2\"".into();
         }
@@ -204,10 +217,21 @@ async fn cancel_then_resume_and_changed_validator_restart() {
                 "changed validator must restart first segment: {seen:?}"
             );
         } else {
-            assert!(
-                !seen.contains(&(0, 32767)),
-                "unchanged validator must resume first segment: {seen:?}"
-            );
+            for (i, size) in saved.iter().copied().enumerate() {
+                let start = i * 32768;
+                let end = start + 32767;
+                if size < 32768 {
+                    assert!(
+                        seen.contains(&(start + size as usize, end)),
+                        "segment {i} must resume at saved offset {size}: {seen:?}"
+                    );
+                } else {
+                    assert!(
+                        !seen.contains(&(start, end)),
+                        "completed segment {i} must not be fetched again: {seen:?}"
+                    );
+                }
+            }
         }
         assert_eq!(tokio::fs::read(result.path).await.unwrap(), *server.bytes);
         tokio::fs::remove_file(dir.path().join("result.bin"))

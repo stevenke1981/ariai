@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import xmlrpc.client
 
 DATA = bytes(range(256)) * 4096
 
@@ -22,6 +23,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == "/digest":
+            auth = self.headers.get("Authorization", "")
+            valid = False
+            if auth.startswith("Digest "):
+                fields = urllib.request.parse_keqv_list(urllib.request.parse_http_list(auth[7:]))
+                ha1 = hashlib.md5(b"user:ariai-smoke:pass").hexdigest()
+                ha2 = hashlib.md5(b"GET:/digest").hexdigest()
+                if fields.get("qop") == "auth":
+                    expected = hashlib.md5(f'{ha1}:smoke-nonce:{fields.get("nc")}:{fields.get("cnonce")}:auth:{ha2}'.encode()).hexdigest()
+                    valid = fields.get("response") == expected and fields.get("uri") == "/digest"
+            if not valid:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Digest realm="ariai-smoke", nonce="smoke-nonce", algorithm=MD5, qop="auth"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+        if self.path == "/cookie" and "smoke=yes" not in self.headers.get("Cookie", ""):
+            self.send_error(403)
+            return
         if self.path == "/remote.meta4":
             xml = f'<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="remote-metalink.bin"><size>{len(DATA)}</size><hash type="sha-256">{hashlib.sha256(DATA).hexdigest()}</hash><url>/file</url></file></metalink>'.encode()
             self.send_response(200)
@@ -67,6 +87,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             type(self).ranges.append((self.path, first, last))
         self.send_response(206 if ranged else 200)
         self.send_header("ETag", '"ariai-smoke-v1"')
+        if self.path == "/set-cookie":
+            self.send_header("Set-Cookie", "smoke=yes; Path=/; Max-Age=3600")
         self.send_header("Content-Length", str(last - first + 1))
         if ranged:
             reported_first = first + 1 if self.path == "/bad-range" else first
@@ -115,6 +137,16 @@ def main():
             assert (directory / "auth.bin").read_bytes() == DATA
             checks.append("http-basic-auth-custom-header")
 
+            run("--http-user=user", "--http-passwd=pass", "--http-auth-challenge", "-o", "digest.bin", base + "/digest")
+            assert (directory / "digest.bin").read_bytes() == DATA
+            checks.append("http-digest-challenge")
+            cookie_file = directory / "cookies.txt"
+            run(f"--save-cookies={cookie_file}", "-o", "cookie-set.bin", base + "/set-cookie")
+            assert "smoke" in cookie_file.read_text(encoding="utf-8")
+            run(f"--load-cookies={cookie_file}", "-o", "cookie.bin", base + "/cookie")
+            assert (directory / "cookie.bin").read_bytes() == DATA
+            checks.append("netscape-cookie-save-load")
+
             run("-o", "mirror.bin", base + "/fail", base + "/file")
             assert (directory / "mirror.bin").read_bytes() == DATA
             checks.append("mirror-failover")
@@ -154,6 +186,20 @@ def main():
             assert (directory / "remote-metalink.bin").read_bytes() == DATA
             checks.append("cli-metalink-http-relative-url")
 
+            piece_size = len(DATA) // 4
+            piece_xml = "".join(f'<hash>{hashlib.sha256(DATA[n:n+piece_size]).hexdigest()}</hash>' for n in range(0, len(DATA), piece_size))
+            repair_xml = f'<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="repair.bin"><size>{len(DATA)}</size><pieces type="sha-256" length="{piece_size}">{piece_xml}</pieces><url>{base}/file</url></file></metalink>'
+            repair_meta = directory / "repair.meta4"
+            repair_meta.write_text(repair_xml, encoding="utf-8")
+            damaged = bytearray(DATA)
+            damaged[piece_size + 1] ^= 255
+            (directory / "repair.bin").write_bytes(damaged)
+            Handler.ranges.clear()
+            run("-M", str(repair_meta), "--check-integrity")
+            assert (directory / "repair.bin").read_bytes() == DATA
+            assert Handler.ranges == [("/file", piece_size, 2 * piece_size - 1)], Handler.ranges
+            checks.append("metalink-selective-piece-repair")
+
             (directory / "seed.bin").write_bytes(DATA)
             torrent = directory / "fixture.torrent"
             torrent.write_bytes(b"d4:infod6:lengthi1048576e4:name8:seed.bin12:piece lengthi1048576e6:pieces20:" + hashlib.sha1(DATA).digest() + b"ee")
@@ -192,6 +238,15 @@ def main():
                 else:
                     raise AssertionError("RPC startup timed out")
                 assert "aria2.addUri" in methods
+                with xmlrpc.client.ServerProxy(f"http://127.0.0.1:{rpc_port}/rpc") as client:
+                    version = client.aria2.getVersion("token:smoke-secret")
+                    assert version["version"] == "0.3.0", version
+                    results = client.system.multicall([
+                        {"methodName": "aria2.getVersion", "params": ["token:smoke-secret"]},
+                        {"methodName": "aria2.getVersion", "params": ["token:wrong"]},
+                    ])
+                    assert results[0][0]["version"] == "0.3.0" and "faultCode" in results[1], results
+                checks.append("xmlrpc-token-multicall")
                 gid = rpc("aria2.addUri", [[base + "/file"], {"dir": str(directory), "out": "rpc.bin"}])
                 for _ in range(100):
                     status = rpc("aria2.tellStatus", [gid])
