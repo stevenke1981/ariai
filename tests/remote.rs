@@ -689,6 +689,86 @@ async fn overall_limit_shares_capacity_between_http_and_ftp_downloads() {
 }
 
 #[tokio::test]
+async fn ftp_and_sftp_piece_repairs_share_overall_limit() {
+    use ariai::{
+        manager::DownloadManager,
+        model::{DownloadStatus, ManagerOptions},
+    };
+    use russh::server::Server as _;
+    use sha2::{Digest, Sha256};
+    let content = b"SFTP loopback!";
+    let (ftp_addr, commands, ftp_task) = ftp_server(content.to_vec()).await;
+    let key = russh::keys::PrivateKey::from_openssh(TEST_KEY).unwrap();
+    let fingerprint = hex::encode(Sha256::digest(key.public_key().to_bytes().unwrap()));
+    let config = Arc::new(russh::server::Config {
+        keys: vec![key],
+        auth_rejection_time: Duration::ZERO,
+        auth_rejection_time_initial: Some(Duration::ZERO),
+        ..Default::default()
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ssh_addr = listener.local_addr().unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let server_reads = reads.clone();
+    let ssh_task = tokio::spawn(async move {
+        let mut server = SshServer {
+            reads: server_reads,
+        };
+        let _ = server.run_on_socket(config, &listener).await;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(ManagerOptions {
+        max_concurrent_downloads: 2,
+        max_overall_download_limit: 4,
+        ..Default::default()
+    })
+    .unwrap();
+    let start = std::time::Instant::now();
+    for (name, addr, scheme) in [("ftp", ftp_addr, "ftp"), ("sftp", ssh_addr, "sftp")] {
+        tokio::fs::write(dir.path().join(name), b"SFTPXXXXpback!")
+            .await
+            .unwrap();
+        let mut req = request(addr, dir.path());
+        req.uris = vec![format!("{scheme}://user:secret@{addr}/file%20name")];
+        req.options.out = Some(name.into());
+        req.options.ssh_host_key_md = Some(format!("sha256={fingerprint}"));
+        req.options.check_integrity = true;
+        req.options.max_download_limit = 4;
+        set_pieces(&mut req, content, 4);
+        manager.add(req).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(8), manager.wait_idle())
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    let snapshots = manager.list().await;
+    assert!(
+        snapshots
+            .iter()
+            .all(|s| s.status == DownloadStatus::Complete),
+        "{snapshots:?}"
+    );
+    assert!(elapsed >= Duration::from_millis(1800), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(6), "{elapsed:?}");
+    for name in ["ftp", "sftp"] {
+        assert_eq!(
+            tokio::fs::read(dir.path().join(name)).await.unwrap(),
+            content
+        );
+    }
+    assert_eq!(*reads.lock().unwrap(), vec![(4, 4)]);
+    let commands = commands.lock().unwrap();
+    assert_eq!(
+        commands.iter().filter(|s| s.starts_with("RETR ")).count(),
+        1
+    );
+    assert!(commands.iter().any(|s| s == "REST 4"));
+    println!("FTP and SFTP repairs: 8 missing bytes in {elapsed:?}");
+    ftp_task.abort();
+    ssh_task.abort();
+}
+
+#[tokio::test]
 async fn cancelled_transfer_releases_overall_limiter() {
     use ariai::{
         manager::DownloadManager,

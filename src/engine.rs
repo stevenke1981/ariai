@@ -844,7 +844,6 @@ async fn download_http_inner(
             options.allow_overwrite || resume_target || imported,
             "output already exists"
         );
-        tokio::fs::remove_file(&target).await?;
     }
     tokio::fs::rename(&assembled, &target).await?;
     clear_parts(&target, part_count).await;
