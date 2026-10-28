@@ -340,3 +340,63 @@ async fn multicall_authenticates_each_nested_call() {
     cancel.cancel();
     data_task.abort();
 }
+
+#[tokio::test]
+async fn change_uri_updates_waiting_download_and_rejects_active_or_invalid() {
+    let (_dir, manager, rpc_url, data_url, cancel, data_task) = setup().await;
+    let active = manager
+        .add(DownloadRequest {
+            uris: vec![format!("{data_url}/hold")],
+            options: manager.download_options(),
+        })
+        .await
+        .unwrap();
+    let first = format!("{data_url}/first");
+    let second = format!("{data_url}/second");
+    let inserted = format!("{data_url}/inserted");
+    let waiting = manager
+        .add(DownloadRequest {
+            uris: vec![first.clone(), second.clone()],
+            options: manager.download_options(),
+        })
+        .await
+        .unwrap();
+    let response = call(
+        &rpc_url,
+        "aria2.changeUri",
+        vec![
+            json!(waiting),
+            json!(1),
+            json!([first]),
+            json!([inserted]),
+            json!(0),
+        ],
+    )
+    .await;
+    assert_eq!(response["result"], json!([1, 1]), "{response}");
+    let uris = call(&rpc_url, "aria2.getUris", vec![json!(waiting)]).await;
+    assert_eq!(uris["result"][0]["uri"], inserted);
+    assert_eq!(uris["result"][1]["uri"], second);
+    for params in [
+        vec![
+            json!(active),
+            json!(1),
+            json!([]),
+            json!(["http://127.0.0.1/new"]),
+        ],
+        vec![
+            json!(waiting),
+            json!(2),
+            json!([]),
+            json!(["http://127.0.0.1/new"]),
+        ],
+        vec![json!(waiting), json!(1), json!([]), json!(["not a URI"])],
+    ] {
+        let response = call(&rpc_url, "aria2.changeUri", params).await;
+        assert!(response.get("error").is_some(), "{response}");
+    }
+    let uris_after = call(&rpc_url, "aria2.getUris", vec![json!(waiting)]).await;
+    assert_eq!(uris_after["result"], uris["result"]);
+    cancel.cancel();
+    data_task.abort();
+}

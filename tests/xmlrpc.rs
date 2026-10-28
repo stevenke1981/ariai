@@ -98,6 +98,50 @@ async fn xml_rpc_authorization_metadata_multicall_and_malformed() {
     assert!(multicall.contains("enabledFeatures"));
     assert!(multicall.contains("faultCode"));
     assert!(multicall.contains("Unauthorized"));
+    let date = "<dateTime.iso8601>20240229T12:34:56</dateTime.iso8601>";
+    let bad_date = post(
+        &url,
+        &call(
+            "aria2.tellStatus",
+            &format!("{}{}", param("<string>token:secret</string>"), param(date)),
+        ),
+    )
+    .await;
+    assert!(
+        bad_date.contains("dateTime.iso8601 is not supported"),
+        "{bad_date}"
+    );
+    let nil = post(
+        &url,
+        &call(
+            "aria2.tellStatus",
+            &format!(
+                "{}{}",
+                param("<string>token:secret</string>"),
+                param("<nil/>")
+            ),
+        ),
+    )
+    .await;
+    assert!(nil.contains("Invalid params"), "{nil}");
+    let typed_call = format!(
+        "<value><struct><member><name>methodName</name><value><string>aria2.tellStatus</string></value></member><member><name>params</name><value><array><data><value><string>token:secret</string></value><value>{date}</value></data></array></value></member></struct></value>"
+    );
+    let typed_multi = post(
+        &url,
+        &call(
+            "system.multicall",
+            &param(&format!(
+                "<array><data>{typed_call}{call_one}</data></array>"
+            )),
+        ),
+    )
+    .await;
+    assert!(
+        typed_multi.contains("dateTime.iso8601 is not supported"),
+        "{typed_multi}"
+    );
+    assert!(typed_multi.contains("enabledFeatures"), "{typed_multi}");
     assert!(post(&url, "<methodCall>").await.contains("Parse error"));
     cancel.cancel();
     task.await.unwrap().unwrap();
