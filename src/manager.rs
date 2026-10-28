@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
@@ -341,6 +341,61 @@ impl DownloadManager {
         entry.snapshot.request.options = options;
         Ok(())
     }
+    pub async fn change_uris(
+        &self,
+        gid: &str,
+        file_index: usize,
+        del: &[String],
+        add: &[String],
+        position: Option<usize>,
+    ) -> Result<(usize, usize)> {
+        ensure!(file_index == 1, "only file index 1 is supported");
+        let mut state = self.inner.state.lock().await;
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.snapshot.gid == gid)
+            .ok_or_else(|| anyhow::anyhow!("download not found: {gid}"))?;
+        ensure!(
+            matches!(
+                entry.snapshot.status,
+                DownloadStatus::Waiting | DownloadStatus::Paused
+            ) && entry.finished.is_none(),
+            "URIs can only be changed for waiting or fully paused downloads"
+        );
+        let mut request = entry.snapshot.request.clone();
+        ensure!(
+            !request.uris.iter().chain(add).any(|uri| {
+                let parsed = url::Url::parse(uri).ok();
+                uri.starts_with("magnet:")
+                    || parsed.as_ref().is_some_and(|url| url.scheme() == "file")
+                    || (!uri.contains("://")
+                        && std::path::Path::new(uri)
+                            .extension()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("torrent")))
+                    || (request.options.follow_torrent
+                        && parsed.as_ref().is_some_and(|url| {
+                            matches!(url.scheme(), "http" | "https")
+                                && url.path().ends_with(".torrent")
+                        }))
+            }),
+            "changing torrent URIs is not supported"
+        );
+        let mut removed = 0;
+        for uri in del {
+            if let Some(index) = request.uris.iter().position(|existing| existing == uri) {
+                request.uris.remove(index);
+                removed += 1;
+            }
+        }
+        let index = position
+            .unwrap_or(request.uris.len())
+            .min(request.uris.len());
+        request.uris.splice(index..index, add.iter().cloned());
+        request.validate()?;
+        entry.snapshot.request = request;
+        Ok((removed, add.len()))
+    }
     pub async fn change_position(&self, gid: &str, position: i64, how: &str) -> Result<usize> {
         let mut state = self.inner.state.lock().await;
         let queue: Vec<usize> = state
@@ -450,7 +505,51 @@ impl DownloadManager {
         Ok(())
     }
     pub async fn load_session(&self, path: &Path) -> Result<usize> {
-        let session: Session = serde_json::from_slice(&tokio::fs::read(path).await?)?;
+        let bytes = tokio::fs::read(path).await?;
+        let session: Session =
+            if bytes.iter().copied().find(|c| !c.is_ascii_whitespace()) == Some(b'{') {
+                serde_json::from_slice(&bytes)?
+            } else {
+                let text = std::str::from_utf8(&bytes).context("session must be UTF-8")?;
+                let mut downloads: Vec<SessionEntry> = Vec::new();
+                for (index, raw) in text.lines().enumerate() {
+                    let line = raw.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if raw.starts_with(char::is_whitespace) {
+                        let (key, value) = line.split_once('=').with_context(|| {
+                            format!("session line {}: expected key=value", index + 1)
+                        })?;
+                        let entry = downloads.last_mut().with_context(|| {
+                            format!("session line {}: option without URI", index + 1)
+                        })?;
+                        match key.trim() {
+                            "gid" => entry.gid = value.trim().to_owned(),
+                            "pause" => entry.paused = crate::config::parse_bool(value.trim())?,
+                            key => crate::config::apply_option(
+                                &mut entry.request.options,
+                                key,
+                                value.trim(),
+                            )
+                            .with_context(|| format!("session line {}", index + 1))?,
+                        }
+                    } else {
+                        downloads.push(SessionEntry {
+                            gid: uuid::Uuid::new_v4().simple().to_string()[..16].to_owned(),
+                            request: DownloadRequest {
+                                uris: line.split_whitespace().map(str::to_owned).collect(),
+                                options: self.download_options(),
+                            },
+                            paused: false,
+                        });
+                    }
+                }
+                Session {
+                    version: 1,
+                    downloads,
+                }
+            };
         ensure!(session.version == 1, "unsupported session version");
         let mut ids = std::collections::HashSet::new();
         for entry in &session.downloads {

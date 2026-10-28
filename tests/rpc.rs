@@ -212,3 +212,21 @@ async fn queue_pause_resume_remove_and_session_reload() {
     restored.shutdown().await.unwrap();
     file_cancel.cancel();
 }
+
+#[tokio::test]
+async fn imports_aria2_text_session_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("aria2.session");
+    tokio::fs::write(&path, "# aria2 session\nhttp://example.org/one http://example.org/mirror\n gid=0123456789abcdef\n pause=true\n out=one.bin\n split=2\n").await.unwrap();
+    let manager = DownloadManager::new(ManagerOptions::default()).unwrap();
+    assert_eq!(manager.load_session(&path).await.unwrap(), 1);
+    let saved = manager.get("0123456789abcdef").await.unwrap();
+    assert_eq!(saved.status, DownloadStatus::Paused);
+    assert_eq!(saved.request.uris.len(), 2);
+    assert_eq!(saved.request.options.out.as_deref(), Some("one.bin"));
+    assert_eq!(saved.request.options.split, 2);
+    tokio::fs::write(&path, "http://example.org/a\n gid=1111111111111111\n pause=true\nhttp://example.org/b\n unsupported-option=value\n").await.unwrap();
+    assert!(manager.load_session(&path).await.is_err());
+    assert!(manager.get("1111111111111111").await.is_err());
+    manager.shutdown().await.unwrap();
+}

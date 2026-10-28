@@ -4,8 +4,8 @@ use std::{net::SocketAddr, num::NonZeroU32, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use librqbit::{
-    AddTorrent, AddTorrentOptions, DhtSessionConfig, ListenerOptions, Session, SessionOptions,
-    limits::LimitsConfig,
+    AddTorrent, AddTorrentOptions, ConnectionOptions, DhtSessionConfig, ListenerOptions, Session,
+    SessionOptions, limits::LimitsConfig,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -25,10 +25,26 @@ pub async fn download(
         "BitTorrent accepts one metadata source; torrent mirror lists are unsupported"
     );
     let options = &request.options;
-    ensure!(
-        options.proxy.is_none(),
-        "proxy is not supported for BitTorrent"
-    );
+    let proxied = options.proxy.is_some();
+    if let Some(proxy) = &options.proxy {
+        let url = url::Url::parse(proxy)?;
+        ensure!(
+            url.scheme() == "socks5" && url.host_str().is_some() && url.port().is_some(),
+            "BitTorrent proxy requires a socks5://host:port URL"
+        );
+        ensure!(
+            !options.bt_initial_peers.is_empty(),
+            "BitTorrent proxy requires --bt-initial-peer; trackers and DHT are disabled in proxy mode"
+        );
+        ensure!(
+            options.bt_trackers.is_empty(),
+            "BitTorrent trackers are not supported in proxy mode"
+        );
+        ensure!(
+            options.bt_listen_port.is_none(),
+            "BitTorrent incoming connections are disabled in proxy mode"
+        );
+    }
     // librqbit uses a token bucket whose burst equals its per-second rate.
     // Its standard requests are 16 KiB, and a smaller burst rejects a request.
     let limit = |value: u64, name: &str| -> Result<Option<NonZeroU32>> {
@@ -71,17 +87,22 @@ pub async fn download(
         .map(|t| url::Url::parse(t).with_context(|| format!("invalid BitTorrent tracker: {t}")))
         .collect::<Result<_>>()?;
     let session_cancel = CancellationToken::new();
-    let listen = Some(ListenerOptions {
+    let listen = (!proxied).then(|| ListenerOptions {
         listen_addr: ([0, 0, 0, 0], options.bt_listen_port.unwrap_or(0)).into(),
         ipv4_only: true,
         ..Default::default()
     });
     let session_options = SessionOptions {
-        dht: options.bt_enable_dht.then(|| DhtSessionConfig {
+        dht: (options.bt_enable_dht && !proxied).then(|| DhtSessionConfig {
             persistence: None,
             ..Default::default()
         }),
         listen,
+        connect: options.proxy.as_ref().map(|proxy| ConnectionOptions {
+            proxy_url: Some(proxy.clone()),
+            ..Default::default()
+        }),
+        disable_trackers: proxied,
         trackers,
         ratelimits,
         cancellation_token: Some(session_cancel.clone()),
