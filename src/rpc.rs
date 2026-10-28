@@ -74,7 +74,7 @@ async fn handle_xml(State(state): State<Arc<RpcState>>, body: Bytes) -> Response
     let result = match crate::xmlrpc::parse(&body) {
         Ok((method, params)) => {
             let mut authenticated = state.secret.is_none();
-            invoke(&state, &method, params, &mut authenticated).await
+            invoke(&state, &method, params, &mut authenticated, true).await
         }
         Err(()) => Err((-32700, "Parse error".into())),
     };
@@ -156,7 +156,14 @@ async fn dispatch(state: &RpcState, request: Value, authenticated: &mut bool) ->
         Some(_) => return id.map(|id| error(id, -32602, "Invalid params")),
     };
     let method = object["method"].as_str().unwrap_or_default();
-    let result = invoke(state, method, std::mem::take(&mut params), authenticated).await;
+    let result = invoke(
+        state,
+        method,
+        std::mem::take(&mut params),
+        authenticated,
+        false,
+    )
+    .await;
     id.map(|id| match result {
         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
         Err((code, message)) => error(id, code, &message),
@@ -167,6 +174,7 @@ async fn invoke(
     method: &str,
     params: Vec<Value>,
     authenticated: &mut bool,
+    xml: bool,
 ) -> RpcResult {
     if method == "system.multicall" {
         count(&params, 1, 1)?;
@@ -184,7 +192,7 @@ async fn invoke(
                     Err((-32600, "Recursive multicall is not allowed".into()))
                 }
                 (Some(name), Some(nested)) => {
-                    invoke_single(state, name, nested.clone(), authenticated).await
+                    invoke_single(state, name, nested.clone(), authenticated, xml).await
                 }
                 _ => Err(invalid()),
             };
@@ -195,13 +203,14 @@ async fn invoke(
         }
         return Ok(Value::Array(results));
     }
-    invoke_single(state, method, params, authenticated).await
+    invoke_single(state, method, params, authenticated, xml).await
 }
 async fn invoke_single(
     state: &RpcState,
     method: &str,
     mut params: Vec<Value>,
     authenticated: &mut bool,
+    xml: bool,
 ) -> RpcResult {
     let supplied = params
         .first()
@@ -218,6 +227,12 @@ async fn invoke_single(
         }
     } else if supplied.is_some() {
         params.remove(0);
+    }
+    if xml && params.iter().any(crate::xmlrpc::has_datetime) {
+        return Err((
+            -32602,
+            "dateTime.iso8601 is not supported by this method".into(),
+        ));
     }
     execute(state, method, &params).await
 }
@@ -432,6 +447,29 @@ async fn execute(state: &RpcState, method: &str, params: &[Value]) -> RpcResult 
             }
             Ok(status(item, None)["files"].clone())
         }
+        "aria2.changeUri" => {
+            count(params, 4, 5)?;
+            let file_index = integer(&params[1])
+                .filter(|n| *n > 0)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(invalid)?;
+            let uris = |value: &Value| -> Result<Vec<String>, (i32, String)> {
+                value
+                    .as_array()
+                    .ok_or_else(invalid)?
+                    .iter()
+                    .map(|uri| uri.as_str().map(str::to_owned).ok_or_else(invalid))
+                    .collect()
+            };
+            let deleted = uris(&params[2])?;
+            let added = uris(&params[3])?;
+            let position = position(params.get(4))?;
+            let (removed, inserted) = manager
+                .change_uris(gid(params)?, file_index, &deleted, &added, position)
+                .await
+                .map_err(failure)?;
+            Ok(json!([removed, inserted]))
+        }
         "aria2.getGlobalOption" => {
             count(params, 0, 0)?;
             Ok(option_values(&manager.download_options()))
@@ -585,6 +623,7 @@ async fn execute(state: &RpcState, method: &str, params: &[Value]) -> RpcResult 
                 "aria2.addMetalink",
                 "aria2.addTorrent",
                 "aria2.getUris",
+                "aria2.changeUri",
                 "aria2.getFiles",
                 "aria2.getOption",
                 "aria2.getGlobalOption",

@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
@@ -9,7 +9,7 @@ use crate::{
     engine,
     model::{
         DownloadOptions, DownloadProgress, DownloadRequest, DownloadSnapshot, DownloadStatus,
-        ManagerOptions,
+        ManagerOptions, SessionFormat,
     },
 };
 
@@ -19,6 +19,7 @@ pub struct DownloadManager {
 }
 struct Inner {
     options: ManagerOptions,
+    limiter: Option<Arc<engine::RateLimiter>>,
     state: Mutex<State>,
     changed: Notify,
     events: broadcast::Sender<(String, DownloadStatus)>,
@@ -52,9 +53,16 @@ impl DownloadManager {
             "max concurrent downloads must be positive"
         );
         options.download_options.validate()?;
+        ensure!(
+            options.max_overall_upload_limit == 0,
+            "global upload limit is unsupported: BitTorrent sessions do not share a limiter"
+        );
+        let limiter = (options.max_overall_download_limit > 0)
+            .then(|| Arc::new(engine::RateLimiter::new(options.max_overall_download_limit)));
         Ok(Self {
             inner: Arc::new(Inner {
                 options,
+                limiter,
                 state: Mutex::new(State {
                     entries: Vec::new(),
                     shutting_down: false,
@@ -160,7 +168,13 @@ impl DownloadManager {
                 .send((gid.clone(), DownloadStatus::Active));
             let manager = self.clone();
             tokio::spawn(async move {
-                let result = engine::download(request, cancel, progress_tx).await;
+                let result = engine::download_with_limit(
+                    request,
+                    cancel,
+                    progress_tx,
+                    manager.inner.limiter.clone(),
+                )
+                .await;
                 let mut state = manager.inner.state.lock().await;
                 if let Some(entry) = state.entries.iter_mut().find(|e| e.snapshot.gid == gid) {
                     let progress = entry.progress.borrow().clone();
@@ -341,6 +355,61 @@ impl DownloadManager {
         entry.snapshot.request.options = options;
         Ok(())
     }
+    pub async fn change_uris(
+        &self,
+        gid: &str,
+        file_index: usize,
+        del: &[String],
+        add: &[String],
+        position: Option<usize>,
+    ) -> Result<(usize, usize)> {
+        ensure!(file_index == 1, "only file index 1 is supported");
+        let mut state = self.inner.state.lock().await;
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.snapshot.gid == gid)
+            .ok_or_else(|| anyhow::anyhow!("download not found: {gid}"))?;
+        ensure!(
+            matches!(
+                entry.snapshot.status,
+                DownloadStatus::Waiting | DownloadStatus::Paused
+            ) && entry.finished.is_none(),
+            "URIs can only be changed for waiting or fully paused downloads"
+        );
+        let mut request = entry.snapshot.request.clone();
+        ensure!(
+            !request.uris.iter().chain(add).any(|uri| {
+                let parsed = url::Url::parse(uri).ok();
+                uri.starts_with("magnet:")
+                    || parsed.as_ref().is_some_and(|url| url.scheme() == "file")
+                    || (!uri.contains("://")
+                        && std::path::Path::new(uri)
+                            .extension()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("torrent")))
+                    || (request.options.follow_torrent
+                        && parsed.as_ref().is_some_and(|url| {
+                            matches!(url.scheme(), "http" | "https")
+                                && url.path().ends_with(".torrent")
+                        }))
+            }),
+            "changing torrent URIs is not supported"
+        );
+        let mut removed = 0;
+        for uri in del {
+            if let Some(index) = request.uris.iter().position(|existing| existing == uri) {
+                request.uris.remove(index);
+                removed += 1;
+            }
+        }
+        let index = position
+            .unwrap_or(request.uris.len())
+            .min(request.uris.len());
+        request.uris.splice(index..index, add.iter().cloned());
+        request.validate()?;
+        entry.snapshot.request = request;
+        Ok((removed, add.len()))
+    }
     pub async fn change_position(&self, gid: &str, position: i64, how: &str) -> Result<usize> {
         let mut state = self.inner.state.lock().await;
         let queue: Vec<usize> = state
@@ -419,12 +488,15 @@ impl DownloadManager {
         for finished in pending {
             Self::wait_finished(Some(finished)).await;
         }
-        if let Some(path) = &self.inner.options.session_file {
-            self.save_session(path).await?;
+        if self.inner.options.session_file.is_some() {
+            self.save_default_session().await?;
         }
         Ok(())
     }
     pub async fn save_session(&self, path: &Path) -> Result<()> {
+        self.save_session_as(path, SessionFormat::Json).await
+    }
+    pub async fn save_session_as(&self, path: &Path, format: SessionFormat) -> Result<()> {
         let state = self.inner.state.lock().await;
         let session = Session {
             version: 1,
@@ -444,13 +516,214 @@ impl DownloadManager {
                 })
                 .collect(),
         };
-        let bytes = serde_json::to_vec_pretty(&session)?;
         drop(state);
+        let bytes = match format {
+            SessionFormat::Json => serde_json::to_vec_pretty(&session)?,
+            SessionFormat::Aria2 => {
+                let mut text = String::from("# ariai-session-v1\n");
+                for entry in &session.downloads {
+                    let o = &entry.request.options;
+                    ensure!(
+                        entry.gid != "0000000000000000",
+                        "aria2 session cannot represent an all-zero gid"
+                    );
+                    ensure!(
+                        o.expected_length.is_none() && o.piece_hashes.is_none(),
+                        "aria2 session cannot represent Metalink length or piece hashes"
+                    );
+                    ensure!(
+                        o.load_cookies.is_none() && o.save_cookies.is_none(),
+                        "aria2 session cannot represent per-download cookie files"
+                    );
+                    ensure!(
+                        o.ssh_private_key.is_none()
+                            && o.ssh_passphrase.is_none()
+                            && o.ssh_known_hosts.is_none(),
+                        "aria2 session cannot represent per-download SSH credentials or known hosts"
+                    );
+                    ensure!(
+                        o.bt_initial_peers.is_empty()
+                            && o.bt_enable_dht
+                            && o.bt_listen_port.is_none(),
+                        "aria2 session cannot represent per-download peer, DHT or listen-port settings"
+                    );
+                    ensure!(
+                        (1024 * 1024..=1024 * 1024 * 1024).contains(&o.min_split_size),
+                        "aria2 session min-split-size must be between 1 MiB and 1 GiB"
+                    );
+                    ensure!(
+                        o.seed_time_explicit || o.seed_time_secs == 0,
+                        "aria2 session cannot represent implicit nonzero seed time"
+                    );
+                    ensure!(
+                        !o.seed_time_explicit || o.seed_time_secs % 60 == 0,
+                        "aria2 session cannot represent seed time with sub-minute precision"
+                    );
+                    for uri in &entry.request.uris {
+                        ensure!(
+                            !uri.chars().any(char::is_whitespace) && !uri.starts_with('#'),
+                            "aria2 session cannot represent URI containing whitespace or starting with #"
+                        );
+                    }
+                    text.push_str(&entry.request.uris.join("\t"));
+                    text.push('\n');
+                    let dir = o
+                        .dir
+                        .to_str()
+                        .context("aria2 session cannot represent non-UTF-8 directory")?;
+                    let mut options = vec![
+                        ("gid", entry.gid.clone()),
+                        ("pause", entry.paused.to_string()),
+                        ("dir", dir.to_owned()),
+                        ("split", o.split.to_string()),
+                        ("min-split-size", o.min_split_size.to_string()),
+                        ("continue", o.continue_download.to_string()),
+                        ("max-tries", o.max_tries.to_string()),
+                        ("retry-wait", o.retry_wait_secs.to_string()),
+                        ("timeout", o.timeout_secs.to_string()),
+                        ("connect-timeout", o.connect_timeout_secs.to_string()),
+                        ("user-agent", o.user_agent.clone()),
+                        ("http-auth-challenge", o.http_auth_challenge.to_string()),
+                        ("max-download-limit", o.max_download_limit.to_string()),
+                        ("max-upload-limit", o.max_upload_limit.to_string()),
+                        ("check-integrity", o.check_integrity.to_string()),
+                        ("allow-overwrite", o.allow_overwrite.to_string()),
+                        ("auto-file-renaming", o.auto_file_renaming.to_string()),
+                        ("ftp-pasv", o.ftp_pasv.to_string()),
+                        ("follow-torrent", o.follow_torrent.to_string()),
+                        ("follow-metalink", o.follow_metalink.to_string()),
+                    ];
+                    for (key, value) in [
+                        ("out", &o.out),
+                        ("referer", &o.referer),
+                        ("all-proxy", &o.proxy),
+                        ("http-user", &o.http_user),
+                        ("http-passwd", &o.http_passwd),
+                        ("checksum", &o.checksum),
+                        ("ftp-user", &o.ftp_user),
+                        ("ftp-passwd", &o.ftp_passwd),
+                        ("ssh-host-key-md", &o.ssh_host_key_md),
+                        ("select-file", &o.select_file),
+                    ] {
+                        if let Some(value) = value {
+                            options.push((key, value.clone()));
+                        }
+                    }
+                    for header in &o.headers {
+                        options.push(("header", header.clone()));
+                    }
+                    if !o.bt_trackers.is_empty() {
+                        ensure!(
+                            o.bt_trackers
+                                .iter()
+                                .all(|v| !v.is_empty() && !v.contains(',')),
+                            "aria2 session cannot represent tracker containing comma or empty tracker"
+                        );
+                        options.push(("bt-tracker", o.bt_trackers.join(",")));
+                    }
+                    if o.seed_time_explicit {
+                        options.push(("seed-time", (o.seed_time_secs / 60).to_string()));
+                    } else if o.seed_ratio.is_none() {
+                        options.push(("seed-time", "0".into()));
+                    }
+                    if let Some(ratio) = o.seed_ratio {
+                        options.push(("seed-ratio", ratio.to_string()));
+                    } else if o.seed_time_explicit && o.seed_time_secs > 0 {
+                        options.push(("seed-ratio", "0".into()));
+                    }
+                    for (key, value) in options {
+                        ensure!(
+                            !value.contains(['\r', '\n']) && value.trim() == value,
+                            "aria2 session cannot represent whitespace or newline in {key}"
+                        );
+                        ensure!(
+                            !matches!(key, "dir" | "out") || !value.contains("${HOME}"),
+                            "aria2 expands ${{HOME}} in {key}"
+                        );
+                        text.push_str(&format!(" {key}={value}\n"));
+                    }
+                    if !o.seed_time_explicit && o.seed_ratio.is_none() {
+                        text.push_str("# ariai-implicit-seed-time\n");
+                    }
+                    if o.seed_ratio.is_none() && o.seed_time_explicit && o.seed_time_secs > 0 {
+                        text.push_str("# ariai-implicit-seed-ratio\n");
+                    }
+                }
+                text.into_bytes()
+            }
+        };
         tokio::fs::write(path, bytes).await?;
         Ok(())
     }
     pub async fn load_session(&self, path: &Path) -> Result<usize> {
-        let session: Session = serde_json::from_slice(&tokio::fs::read(path).await?)?;
+        let bytes = tokio::fs::read(path).await?;
+        let session: Session =
+            if bytes.iter().copied().find(|c| !c.is_ascii_whitespace()) == Some(b'{') {
+                serde_json::from_slice(&bytes)?
+            } else {
+                let text = std::str::from_utf8(&bytes).context("session must be UTF-8")?;
+                let exported = text.lines().next() == Some("# ariai-session-v1");
+                let mut downloads: Vec<SessionEntry> = Vec::new();
+                for (index, raw) in text.lines().enumerate() {
+                    let line = raw.trim();
+                    if exported && line == "# ariai-implicit-seed-time" {
+                        downloads
+                            .last_mut()
+                            .context("seed-time marker without URI")?
+                            .request
+                            .options
+                            .seed_time_explicit = false;
+                        continue;
+                    }
+                    if exported && line == "# ariai-implicit-seed-ratio" {
+                        downloads
+                            .last_mut()
+                            .context("seed-ratio marker without URI")?
+                            .request
+                            .options
+                            .seed_ratio = None;
+                        continue;
+                    }
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if raw.starts_with(char::is_whitespace) {
+                        let (key, value) = line.split_once('=').with_context(|| {
+                            format!("session line {}: expected key=value", index + 1)
+                        })?;
+                        let entry = downloads.last_mut().with_context(|| {
+                            format!("session line {}: option without URI", index + 1)
+                        })?;
+                        match key.trim() {
+                            "gid" => entry.gid = value.trim().to_owned(),
+                            "pause" => entry.paused = crate::config::parse_bool(value.trim())?,
+                            key => crate::config::apply_option(
+                                &mut entry.request.options,
+                                key,
+                                value.trim(),
+                            )
+                            .with_context(|| format!("session line {}", index + 1))?,
+                        }
+                    } else {
+                        downloads.push(SessionEntry {
+                            gid: uuid::Uuid::new_v4().simple().to_string()[..16].to_owned(),
+                            request: DownloadRequest {
+                                uris: line.split_whitespace().map(str::to_owned).collect(),
+                                options: if exported {
+                                    DownloadOptions::default()
+                                } else {
+                                    self.download_options()
+                                },
+                            },
+                            paused: false,
+                        });
+                    }
+                }
+                Session {
+                    version: 1,
+                    downloads,
+                }
+            };
         ensure!(session.version == 1, "unsupported session version");
         let mut ids = std::collections::HashSet::new();
         for entry in &session.downloads {
@@ -517,6 +790,7 @@ impl DownloadManager {
             .session_file
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("session file is not configured"))?;
-        self.save_session(path).await
+        self.save_session_as(path, self.inner.options.session_format)
+            .await
     }
 }

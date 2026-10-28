@@ -315,16 +315,29 @@ pub struct DownloadSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct ManagerOptions {
+    pub session_format: SessionFormat,
     pub max_concurrent_downloads: usize,
+    pub max_overall_download_limit: u64,
+    pub max_overall_upload_limit: u64,
     pub session_file: Option<PathBuf>,
     pub download_options: DownloadOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub enum SessionFormat {
+    #[default]
+    Json,
+    Aria2,
 }
 
 impl Default for ManagerOptions {
     fn default() -> Self {
         Self {
             max_concurrent_downloads: 5,
+            max_overall_download_limit: 0,
+            max_overall_upload_limit: 0,
             session_file: None,
+            session_format: SessionFormat::Json,
             download_options: DownloadOptions::default(),
         }
     }

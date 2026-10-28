@@ -193,3 +193,92 @@ async fn repairs_only_damaged_or_missing_pieces_and_skips_verified_files() {
     assert_eq!(tokio::fs::read(&target).await.unwrap(), BAD);
     server.abort();
 }
+
+#[tokio::test]
+async fn overall_limit_covers_concurrent_piece_repairs() {
+    use ariai::{
+        manager::DownloadManager,
+        model::{DownloadStatus, ManagerOptions},
+    };
+    use std::time::{Duration, Instant};
+    let bytes = vec![42u8; 64 * 1024];
+    let body = bytes.clone();
+    let app = Router::new().route(
+        "/file",
+        get(move || {
+            let body = body.clone();
+            async move {
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(
+                        "content-range",
+                        format!("bytes 0-{}/{}", body.len() - 1, body.len()),
+                    )
+                    .body(Body::from(body))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(ManagerOptions {
+        max_concurrent_downloads: 2,
+        max_overall_download_limit: 64 * 1024,
+        ..Default::default()
+    })
+    .unwrap();
+    let started = Instant::now();
+    for i in 0..2 {
+        let name = format!("repair-{i}");
+        tokio::fs::write(dir.path().join(&name), vec![0u8; bytes.len()])
+            .await
+            .unwrap();
+        let options = DownloadOptions {
+            dir: dir.path().to_owned(),
+            out: Some(name),
+            expected_length: Some(bytes.len() as u64),
+            piece_hashes: Some(PieceHashes {
+                algorithm: "sha256".into(),
+                length: bytes.len() as u64,
+                hashes: vec![hex::encode(Sha256::digest(&bytes))],
+            }),
+            check_integrity: true,
+            max_tries: 1,
+            ..Default::default()
+        };
+        manager
+            .add(DownloadRequest {
+                uris: vec![format!("http://{address}/file")],
+                options,
+            })
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(8), manager.wait_idle())
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    let snapshots = manager.list().await;
+    assert!(
+        snapshots
+            .iter()
+            .all(|s| s.status == DownloadStatus::Complete),
+        "{snapshots:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(1800),
+        "repair transfers exceeded aggregate limit: {elapsed:?}"
+    );
+    for i in 0..2 {
+        assert_eq!(
+            tokio::fs::read(dir.path().join(format!("repair-{i}")))
+                .await
+                .unwrap(),
+            bytes
+        );
+    }
+    println!("two repairs: {} bytes in {:?}", 2 * bytes.len(), elapsed);
+    server.abort();
+}

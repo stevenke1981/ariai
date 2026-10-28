@@ -404,3 +404,140 @@ async fn digest_challenge_after_same_origin_redirect() {
     );
     assert_eq!(state.count.load(Ordering::SeqCst), 2);
 }
+
+async fn digest_auth_int(headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let hash = |v: &[u8]| hex::encode(Sha256::digest(v));
+    let valid = (|| {
+        let nonce = field(auth, "nonce")?;
+        let cnonce = field(auth, "cnonce")?;
+        let uri = field(auth, "uri")?;
+        let ha1 = hash(b"alice:test-realm:secret");
+        let ha2 = hash(format!("POST:{uri}:{}", hash(&body)).as_bytes());
+        let expected = hash(format!("{ha1}:{nonce}:00000001:{cnonce}:auth-int:{ha2}").as_bytes());
+        Some(
+            body.as_ref() == b"nonempty body\x00bytes"
+                && uri == "/auth-int?x=1"
+                && nonce == "int-nonce"
+                && field(auth, "qop")? == "auth-int"
+                && field(auth, "response")? == expected,
+        )
+    })()
+    .unwrap_or(false);
+    if valid {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .unwrap();
+    }
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(
+            header::WWW_AUTHENTICATE,
+            "Digest realm=\"test-realm\", nonce=\"int-nonce\", algorithm=SHA-256, qop=\"auth-int\"",
+        )
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn digest_auth_int_post_hashes_actual_binary_body_and_rejects_wrong_password() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/auth-int?x=1", listener.local_addr().unwrap());
+    tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new().route("/auth-int", axum::routing::post(digest_auth_int)),
+        )
+        .into_future(),
+    );
+    for (password, status) in [
+        ("secret", StatusCode::OK),
+        ("wrong", StatusCode::UNAUTHORIZED),
+    ] {
+        let session = HttpSession::new(&DownloadOptions {
+            http_user: Some("alice".into()),
+            http_passwd: Some(password.into()),
+            http_auth_challenge: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let response = session
+            .send(
+                session
+                    .request(reqwest::Method::POST, &url)
+                    .body(&b"nonempty body\x00bytes"[..]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+}
+
+#[tokio::test]
+async fn sqlite_browser_cookies_and_wal_are_loaded_with_scope_and_expiry() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/private/file", get(cookie_echo))
+                .route("/other", get(cookie_echo)),
+        )
+        .into_future(),
+    );
+    for (file, expected) in [
+        ("firefox.sqlite", "firefox=yes"),
+        ("chromium.sqlite", "chromium=yes"),
+        ("wal.sqlite", "wal=yes"),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/http_cookies")
+            .join(file);
+        let session = HttpSession::new(&DownloadOptions {
+            load_cookies: Some(path),
+            ..Default::default()
+        })
+        .unwrap();
+        let text = session
+            .send(session.request(reqwest::Method::GET, &format!("{base}/private/file")))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(text.contains(expected), "{file}: {text}");
+        assert!(!text.contains("secure=") && !text.contains("expired="));
+        assert!(
+            session
+                .send(session.request(reqwest::Method::GET, &format!("{base}/other")))
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn encrypted_chromium_cookie_is_explicitly_rejected() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/http_cookies/encrypted.sqlite");
+    let result = HttpSession::new(&DownloadOptions {
+        load_cookies: Some(path),
+        ..Default::default()
+    });
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("encrypted_value requires OS decryption")
+    );
+}

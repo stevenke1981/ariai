@@ -23,12 +23,71 @@ fn hasher(algorithm: &str) -> Result<Box<dyn sha2::digest::DynDigest + Send>> {
     })
 }
 
+/// Identify corrupt or missing pieces without changing the file.
+pub async fn bad_pieces(
+    path: &Path,
+    options: &crate::model::DownloadOptions,
+    cancel: &CancellationToken,
+) -> Result<(u64, Vec<(usize, u64, u64)>)> {
+    let pieces = options
+        .piece_hashes
+        .as_ref()
+        .context("missing piece hashes")?;
+    let mut file = tokio::fs::File::open(path).await?;
+    let length = options
+        .expected_length
+        .unwrap_or(file.metadata().await?.len());
+    ensure!(
+        pieces.length > 0
+            && length > 0
+            && length.div_ceil(pieces.length) == pieces.hashes.len() as u64,
+        "piece hash list does not cover the expected file length"
+    );
+    let mut buffer = vec![0; 128 * 1024];
+    let mut bad = Vec::new();
+    for (index, expected) in pieces.hashes.iter().enumerate() {
+        let start = index as u64 * pieces.length;
+        let size = pieces.length.min(length - start);
+        file.seek(SeekFrom::Start(start)).await?;
+        let mut remaining = size;
+        let mut hash = hasher(&pieces.algorithm)?;
+        while remaining > 0 {
+            let wanted = remaining.min(buffer.len() as u64) as usize;
+            let n = tokio::select! {
+                _ = cancel.cancelled() => bail!("download cancelled"),
+                n = file.read(&mut buffer[..wanted]) => n?,
+            };
+            if n == 0 {
+                break;
+            }
+            hash.update(&buffer[..n]);
+            remaining -= n as u64;
+        }
+        if remaining != 0 || !hex::encode(hash.finalize()).eq_ignore_ascii_case(expected) {
+            bad.push((index, start, size));
+        }
+    }
+    ensure!(!cancel.is_cancelled(), "download cancelled");
+    Ok((length, bad))
+}
+
 pub async fn repair_file(
     path: &Path,
     request: &DownloadRequest,
     session: &HttpSession,
     cancel: &CancellationToken,
     progress: &watch::Sender<DownloadProgress>,
+) -> Result<()> {
+    repair_file_with_limit(path, request, session, cancel, progress, None).await
+}
+
+pub(crate) async fn repair_file_with_limit(
+    path: &Path,
+    request: &DownloadRequest,
+    session: &HttpSession,
+    cancel: &CancellationToken,
+    progress: &watch::Sender<DownloadProgress>,
+    limiter: Option<&crate::engine::RateLimiter>,
 ) -> Result<()> {
     let options = &request.options;
     let Some(pieces) = &options.piece_hashes else {
@@ -118,6 +177,7 @@ pub async fn repair_file(
                         file.write_all(&chunk).await?;
                         hash.update(&chunk);
                         received += chunk.len() as u64;
+                        if let Some(limiter) = limiter { limiter.acquire(chunk.len() as u64, cancel).await?; }
                         if options.max_download_limit > 0 {
                             tokio::select! {
                                 _ = cancel.cancelled() => bail!("download cancelled"),

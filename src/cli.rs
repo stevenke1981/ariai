@@ -1,7 +1,7 @@
 use crate::{
-    config::{apply_option, parse_bool},
+    config::{apply_option, parse_bool, parse_size},
     manager::DownloadManager,
-    model::{DownloadOptions, DownloadRequest, DownloadStatus, ManagerOptions},
+    model::{DownloadOptions, DownloadRequest, DownloadStatus, ManagerOptions, SessionFormat},
     rpc,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -54,6 +54,8 @@ const DOWNLOAD_OPTIONS: &[(&str, Option<char>, bool)] = &[
 ];
 const GLOBAL_OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("max-concurrent-downloads", Some('j'), false),
+    ("max-overall-download-limit", None, false),
+    ("max-overall-upload-limit", None, false),
     ("input-file", Some('i'), false),
     ("force-sequential", None, true),
     ("enable-rpc", None, true),
@@ -61,6 +63,7 @@ const GLOBAL_OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("rpc-listen-all", None, true),
     ("rpc-secret", None, false),
     ("save-session", None, false),
+    ("save-session-format", None, false),
     ("load-session", None, false),
     ("json", None, true),
     ("torrent-file", Some('T'), false),
@@ -70,6 +73,8 @@ const GLOBAL_OPTIONS: &[(&str, Option<char>, bool)] = &[
 struct Settings {
     download: DownloadOptions,
     concurrent: Option<usize>,
+    overall_download: u64,
+    overall_upload: u64,
     input: Option<PathBuf>,
     sequential: bool,
     rpc: bool,
@@ -77,6 +82,7 @@ struct Settings {
     listen_all: bool,
     secret: Option<String>,
     save: Option<PathBuf>,
+    session_format: SessionFormat,
     load: Option<PathBuf>,
     json: bool,
     torrent: Option<String>,
@@ -86,6 +92,8 @@ impl Settings {
     fn apply(&mut self, key: &str, value: &str) -> Result<()> {
         match key {
             "max-concurrent-downloads" => self.concurrent = Some(value.parse()?),
+            "max-overall-download-limit" => self.overall_download = parse_size(value)?,
+            "max-overall-upload-limit" => self.overall_upload = parse_size(value)?,
             "input-file" => self.input = Some(value.into()),
             "force-sequential" => self.sequential = parse_bool(value)?,
             "enable-rpc" => self.rpc = parse_bool(value)?,
@@ -93,6 +101,13 @@ impl Settings {
             "rpc-listen-all" => self.listen_all = parse_bool(value)?,
             "rpc-secret" => self.secret = Some(value.into()),
             "save-session" => self.save = Some(value.into()),
+            "save-session-format" => {
+                self.session_format = match value {
+                    "json" => SessionFormat::Json,
+                    "aria2" => SessionFormat::Aria2,
+                    _ => bail!("save-session-format must be json or aria2"),
+                }
+            }
             "load-session" => self.load = Some(value.into()),
             "json" => self.json = parse_bool(value)?,
             "torrent-file" => self.torrent = Some(value.into()),
@@ -252,7 +267,10 @@ pub async fn run() -> Result<()> {
     }
     let manager = DownloadManager::new(ManagerOptions {
         max_concurrent_downloads: settings.concurrent.unwrap_or(5),
+        max_overall_download_limit: settings.overall_download,
+        max_overall_upload_limit: settings.overall_upload,
         session_file: settings.save.clone(),
+        session_format: settings.session_format,
         download_options: settings.download,
     })?;
     if let Some(path) = &settings.load {

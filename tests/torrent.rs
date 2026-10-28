@@ -24,6 +24,192 @@ fn fixture() -> (Vec<u8>, String, Vec<u8>, Vec<u8>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn socks_proxy_carries_metadata_and_peer_traffic() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tmp = tempfile::tempdir().unwrap();
+    let (metadata, _, a, b) = fixture();
+    let seed_dir = tmp.path().join("seed");
+    tokio::fs::create_dir_all(seed_dir.join("bundle"))
+        .await
+        .unwrap();
+    tokio::fs::write(seed_dir.join("bundle/a.txt"), &a)
+        .await
+        .unwrap();
+    tokio::fs::write(seed_dir.join("bundle/b.txt"), &b)
+        .await
+        .unwrap();
+    let seed = Session::new_with_opts(
+        seed_dir,
+        SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            listen: Some(ListenerOptions {
+                listen_addr: ([127, 0, 0, 1], 0).into(),
+                ipv4_only: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = seed
+        .add_torrent(
+            AddTorrent::from_bytes(metadata.clone()),
+            Some(AddTorrentOptions {
+                overwrite: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_handle()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_until_completed())
+        .await
+        .unwrap()
+        .unwrap();
+    let peer = seed.listen_addr().unwrap();
+    let web = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let web_addr = web.local_addr().unwrap();
+    let web_task = tokio::spawn(async move {
+        axum::serve(
+            web,
+            axum::Router::new().route(
+                "/file.torrent",
+                axum::routing::get(move || {
+                    let data = metadata.clone();
+                    async move { data }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer_connections = Arc::new(AtomicUsize::new(0));
+    let metadata_connections = Arc::new(AtomicUsize::new(0));
+    let pc = peer_connections.clone();
+    let mc = metadata_connections.clone();
+    let proxy_task = tokio::spawn(async move {
+        loop {
+            let (mut inbound, _) = listener.accept().await.unwrap();
+            let pc = pc.clone();
+            let mc = mc.clone();
+            tokio::spawn(async move {
+                let mut greeting = [0; 2];
+                inbound.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting[0], 5);
+                let mut methods = vec![0; greeting[1] as usize];
+                inbound.read_exact(&mut methods).await.unwrap();
+                assert!(methods.contains(&0));
+                inbound.write_all(&[5, 0]).await.unwrap();
+                let mut head = [0; 4];
+                inbound.read_exact(&mut head).await.unwrap();
+                assert_eq!(&head[..3], &[5, 1, 0]);
+                let host = match head[3] {
+                    1 => {
+                        let mut ip = [0; 4];
+                        inbound.read_exact(&mut ip).await.unwrap();
+                        std::net::Ipv4Addr::from(ip).to_string()
+                    }
+                    3 => {
+                        let len = inbound.read_u8().await.unwrap();
+                        let mut name = vec![0; len as usize];
+                        inbound.read_exact(&mut name).await.unwrap();
+                        String::from_utf8(name).unwrap()
+                    }
+                    other => panic!("unexpected address type {other}"),
+                };
+                let port = inbound.read_u16().await.unwrap();
+                if port == peer.port() {
+                    pc.fetch_add(1, Ordering::SeqCst);
+                }
+                if port == web_addr.port() {
+                    mc.fetch_add(1, Ordering::SeqCst);
+                }
+                let mut outbound = tokio::net::TcpStream::connect((host.as_str(), port))
+                    .await
+                    .unwrap();
+                inbound
+                    .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            });
+        }
+    });
+    let (tx, _) = watch::channel(DownloadProgress::default());
+    let result = tokio::time::timeout(
+        Duration::from_secs(25),
+        torrent::download(
+            DownloadRequest {
+                uris: vec![format!("http://{web_addr}/file.torrent")],
+                options: DownloadOptions {
+                    dir: tmp.path().join("download"),
+                    proxy: Some(format!("socks5://{addr}")),
+                    bt_initial_peers: vec![peer.to_string()],
+                    ..Default::default()
+                },
+            },
+            CancellationToken::new(),
+            tx,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(tokio::fs::read(result.path.join("a.txt")).await.unwrap(), a);
+    assert_eq!(tokio::fs::read(result.path.join("b.txt")).await.unwrap(), b);
+    assert!(peer_connections.load(Ordering::SeqCst) > 0);
+    assert!(metadata_connections.load(Ordering::SeqCst) > 0);
+    proxy_task.abort();
+    web_task.abort();
+    seed.stop().await;
+}
+
+#[tokio::test]
+async fn proxy_rejects_unavailable_discovery_and_incoming_modes() {
+    let (tx, _) = watch::channel(DownloadProgress::default());
+    for options in [
+        DownloadOptions {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            ..Default::default()
+        },
+        DownloadOptions {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            bt_initial_peers: vec!["127.0.0.1:10000".into()],
+            bt_trackers: vec!["udp://127.0.0.1:10001".into()],
+            ..Default::default()
+        },
+        DownloadOptions {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            bt_initial_peers: vec!["127.0.0.1:10000".into()],
+            bt_listen_port: Some(6881),
+            ..Default::default()
+        },
+    ] {
+        let error = torrent::download(
+            DownloadRequest {
+                uris: vec!["magnet:?xt=urn:btih:0000000000000000000000000000000000000000".into()],
+                options,
+            },
+            CancellationToken::new(),
+            tx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("proxy"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transfer_selected_file_and_magnet_from_loopback_seed() {
     let tmp = tempfile::tempdir().unwrap();
     let seed = tmp.path().join("seed");

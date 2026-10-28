@@ -2,6 +2,18 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use quick_xml::{Reader, events::Event};
 use serde_json::{Map, Number, Value};
 
+const DATETIME_KEY: &str = "\0xmlrpc.dateTime.iso8601";
+
+pub(crate) fn has_datetime(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(has_datetime),
+        Value::Object(values) => {
+            values.contains_key(DATETIME_KEY) || values.values().any(has_datetime)
+        }
+        _ => false,
+    }
+}
+
 struct Node {
     name: String,
     text: String,
@@ -10,6 +22,9 @@ struct Node {
 
 fn parse_tree(bytes: &[u8]) -> Result<Node, ()> {
     std::str::from_utf8(bytes).map_err(|_| ())?;
+    if bytes.contains(&0) {
+        return Err(());
+    }
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().expand_empty_elements = true;
     let mut stack: Vec<Node> = Vec::new();
@@ -56,6 +71,9 @@ fn parse_tree(bytes: &[u8]) -> Result<Node, ()> {
                 let name = e.xml_content(quick_xml::XmlVersion::Implicit1_0);
                 let encoded = format!("&{name};");
                 let decoded = quick_xml::escape::unescape(&encoded).map_err(|_| ())?;
+                if decoded.contains('\0') {
+                    return Err(());
+                }
                 stack.last_mut().ok_or(())?.text.push_str(&decoded);
             }
             Event::Decl(_) | Event::Comment(_) => {}
@@ -94,6 +112,59 @@ fn value(node: &Node) -> Result<Value, ()> {
     let n = &node.children[0];
     match n.name.as_str() {
         "string" => Ok(Value::String(scalar(n, "string")?.to_owned())),
+        "nil" => {
+            if !scalar(n, "nil")?.trim().is_empty() {
+                return Err(());
+            }
+            Ok(Value::Null)
+        }
+        "dateTime.iso8601" => {
+            let text = scalar(n, "dateTime.iso8601")?.trim();
+            let bytes = text.as_bytes();
+            if bytes.len() != 17
+                || bytes[8] != b'T'
+                || bytes[11] != b':'
+                || bytes[14] != b':'
+                || bytes
+                    .iter()
+                    .enumerate()
+                    .any(|(i, b)| !matches!(i, 8 | 11 | 14) && !b.is_ascii_digit())
+            {
+                return Err(());
+            }
+            let year: u32 = text[0..4].parse().map_err(|_| ())?;
+            let month: usize = text[4..6].parse().map_err(|_| ())?;
+            let day: u32 = text[6..8].parse().map_err(|_| ())?;
+            let hour: u32 = text[9..11].parse().map_err(|_| ())?;
+            let minute: u32 = text[12..14].parse().map_err(|_| ())?;
+            let second: u32 = text[15..17].parse().map_err(|_| ())?;
+            let leap =
+                year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+            let days = [
+                31,
+                if leap { 29 } else { 28 },
+                31,
+                30,
+                31,
+                30,
+                31,
+                31,
+                30,
+                31,
+                30,
+                31,
+            ];
+            if !(1..=12).contains(&month)
+                || day == 0
+                || day > days[month - 1]
+                || hour > 23
+                || minute > 59
+                || second > 59
+            {
+                return Err(());
+            }
+            Ok(serde_json::json!({DATETIME_KEY: text}))
+        }
         "base64" => {
             let s: String = scalar(n, "base64")?
                 .chars()
@@ -194,6 +265,13 @@ fn write_value(out: &mut String, v: &Value) {
             }
             out.push_str("</data></array>");
         }
+        Value::Object(m) if m.len() == 1 && m.get(DATETIME_KEY).is_some_and(Value::is_string) => {
+            out.push_str("<dateTime.iso8601>");
+            out.push_str(&quick_xml::escape::escape(
+                m[DATETIME_KEY].as_str().unwrap_or_default(),
+            ));
+            out.push_str("</dateTime.iso8601>");
+        }
         Value::Object(m) => {
             out.push_str("<struct>");
             for (k, v) in m {
@@ -205,7 +283,7 @@ fn write_value(out: &mut String, v: &Value) {
             }
             out.push_str("</struct>");
         }
-        Value::Null => out.push_str("<string></string>"),
+        Value::Null => out.push_str("<nil/>"),
     }
     out.push_str("</value>");
 }
@@ -252,6 +330,14 @@ mod tests {
             assert!(parse(bad.as_bytes()).is_err(), "{bad}");
         }
         assert!(parse(format!("<methodCall><methodName>x</methodName><params><param>{}<value>x</value>{}</param></params></methodCall>", "<value><array><data>".repeat(65), "</data></array></value>".repeat(65)).as_bytes()).is_err());
+        let typed = br#"<methodCall><methodName>test</methodName><params><param><value><array><data><value><nil/></value><value><dateTime.iso8601>20240229T12:34:56</dateTime.iso8601></value></data></array></value></param></params></methodCall>"#;
+        let (_, params) = parse(typed).unwrap();
+        assert_eq!(params[0][0], Value::Null);
+        assert!(has_datetime(&params[0]));
+        let encoded_typed = response(Ok(params[0].clone()));
+        assert!(encoded_typed.contains("<nil/>"));
+        assert!(encoded_typed.contains("<dateTime.iso8601>20240229T12:34:56</dateTime.iso8601>"));
+        assert!(parse(br#"<methodCall><methodName>x</methodName><params><param><value><dateTime.iso8601>20230229T12:34:56</dateTime.iso8601></value></param></params></methodCall>"#).is_err());
         let encoded = response(Ok(json!({"<key>":"<&\""})));
         assert!(encoded.contains("&lt;key&gt;"));
         assert!(encoded.contains("&lt;&amp;&quot;"));

@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::watch,
 };
@@ -77,6 +77,8 @@ async fn transfer(
     target: &Path,
     cancel: &CancellationToken,
     progress: &watch::Sender<DownloadProgress>,
+    range: Option<(u64, u64)>,
+    limiter: Option<&crate::engine::RateLimiter>,
 ) -> Result<()> {
     let opts = &request.options;
     let url = url::Url::parse(uri)?;
@@ -141,6 +143,11 @@ async fn transfer(
     } else {
         String::new()
     };
+    if range.is_some()
+        && let Some(expected) = opts.expected_length
+    {
+        ensure!(size == expected, "remote source length mismatch");
+    }
     let identity = Identity {
         uri_hash: hex::encode(Sha256::digest(uri.as_bytes())),
         size,
@@ -152,7 +159,9 @@ async fn transfer(
         .await
         .ok()
         .and_then(|v| serde_json::from_slice::<Identity>(&v).ok());
-    let mut offset = if opts.continue_download
+    let mut offset = if let Some((start, _)) = range {
+        start
+    } else if opts.continue_download
         && !identity.modified.is_empty()
         && previous.as_ref() == Some(&identity)
     {
@@ -166,13 +175,22 @@ async fn transfer(
     if offset > size {
         offset = 0;
     }
+    let end = if let Some((start, length)) = range {
+        ensure!(
+            start.checked_add(length).is_some_and(|end| end <= size),
+            "invalid repair range"
+        );
+        start + length
+    } else {
+        size
+    };
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(offset == 0)
-        .append(offset > 0)
+        .truncate(range.is_none() && offset == 0)
         .open(&partial)
         .await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
     tokio::fs::write(&sidecar, serde_json::to_vec(&identity)?).await?;
     progress.send_modify(|p| {
         p.path = Some(target.to_path_buf());
@@ -180,7 +198,7 @@ async fn transfer(
         p.completed_length = offset;
         p.download_speed = 0;
     });
-    if offset < size {
+    if offset < end {
         let mut data = if opts.ftp_pasv {
             let (code, reply) = control.command("EPSV").await?;
             let port = if code == 229 {
@@ -253,7 +271,7 @@ async fn transfer(
         } else {
             None
         };
-        if offset > 0 {
+        if offset > 0 || range.is_some() {
             ensure!(
                 control.command(&format!("REST {offset}")).await?.0 == 350,
                 "FTP REST unavailable"
@@ -278,7 +296,11 @@ async fn transfer(
         let initial = offset;
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), n = tokio::time::timeout(Duration::from_secs(opts.timeout_secs), data.read(&mut buf)) => n?? };
+            if offset == end {
+                break;
+            }
+            let wanted = (end - offset).min(buf.len() as u64) as usize;
+            let n = tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), n = tokio::time::timeout(Duration::from_secs(opts.timeout_secs), data.read(&mut buf[..wanted])) => n?? };
             if n == 0 {
                 break;
             }
@@ -290,6 +312,9 @@ async fn transfer(
                 p.download_speed =
                     ((offset - initial) as f64 / start.elapsed().as_secs_f64().max(0.001)) as u64;
             });
+            if let Some(limiter) = limiter {
+                limiter.acquire(n as u64, cancel).await?;
+            }
             if opts.max_download_limit > 0 {
                 let wait = Duration::from_secs_f64(
                     (offset - initial) as f64 / opts.max_download_limit as f64,
@@ -298,11 +323,17 @@ async fn transfer(
                 tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), _ = tokio::time::sleep(wait) => {} }
             }
         }
-        ensure!(offset == size, "FTP transfer ended early");
-        ensure!(
-            matches!(control.reply().await?.0, 226 | 250),
-            "FTP transfer not completed"
-        );
+        ensure!(offset == end, "FTP transfer ended early");
+        drop(data);
+        let code = control.reply().await?.0;
+        if code == 426 && range.is_some() {
+            ensure!(
+                matches!(control.reply().await?.0, 226 | 250),
+                "FTP abort not completed"
+            );
+        } else {
+            ensure!(matches!(code, 226 | 250), "FTP transfer not completed");
+        }
     }
     let (size_code, final_size) = control.command(&format!("SIZE {path}")).await?;
     ensure!(
@@ -323,29 +354,129 @@ async fn transfer(
     Ok(())
 }
 
+async fn repair_partial(
+    request: &DownloadRequest,
+    target: &Path,
+    cancel: &CancellationToken,
+    progress: &watch::Sender<DownloadProgress>,
+    limiter: Option<&crate::engine::RateLimiter>,
+) -> Result<()> {
+    let partial = super::side_path(target, ".ariai.remote.part");
+    let (length, bad) = crate::integrity::bad_pieces(&partial, &request.options, cancel).await?;
+    let mut repair_request = request.clone();
+    repair_request.options.expected_length = Some(length);
+    let mut verified = length - bad.iter().map(|(_, _, size)| size).sum::<u64>();
+    progress.send_modify(|p| {
+        p.path = Some(target.to_owned());
+        p.total_length = Some(length);
+        p.completed_length = verified;
+    });
+    for (index, start, size) in bad {
+        let mut failure = anyhow!("no repair mirror succeeded");
+        let mut repaired = false;
+        'attempts: for attempt in 0..request.options.max_tries.max(1) {
+            for uri in &request.uris {
+                let result = tokio::select! {
+                    _ = cancel.cancelled() => bail!("download cancelled"),
+                    result = transfer(&repair_request, uri, target, cancel, progress, Some((start, size)), limiter) => result,
+                };
+                match result {
+                    Ok(()) => {
+                        let (_, remaining) =
+                            crate::integrity::bad_pieces(&partial, &request.options, cancel)
+                                .await?;
+                        if !remaining.iter().any(|(i, _, _)| *i == index) {
+                            repaired = true;
+                            break 'attempts;
+                        }
+                        failure = anyhow!("repaired piece checksum mismatch");
+                    }
+                    Err(error) => failure = error,
+                }
+            }
+            if attempt + 1 < request.options.max_tries.max(1) {
+                tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), _ = tokio::time::sleep(Duration::from_secs(request.options.retry_wait_secs)) => {} }
+            }
+        }
+        ensure!(repaired, "piece {} repair failed: {failure:#}", index + 1);
+        verified += size;
+        progress.send_modify(|p| p.completed_length = verified);
+    }
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&partial)
+        .await?;
+    file.set_len(length).await?;
+    file.sync_all().await?;
+    ensure!(!cancel.is_cancelled(), "download cancelled");
+    super::verify_file(&partial, &request.options).await
+}
+
 pub async fn download(
     request: DownloadRequest,
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
 ) -> Result<DownloadResult> {
+    download_with_limit(request, cancel, progress, None).await
+}
+
+pub(crate) async fn download_with_limit(
+    request: DownloadRequest,
+    cancel: CancellationToken,
+    progress: watch::Sender<DownloadProgress>,
+    limiter: Option<std::sync::Arc<crate::engine::RateLimiter>>,
+) -> Result<DownloadResult> {
     request.validate()?;
     ensure!(request.options.proxy.is_none(), "FTP proxy is unsupported");
-    let target = super::target(&request).await?;
+    let mut target_request = request.clone();
+    if request.options.check_integrity && request.options.piece_hashes.is_some() {
+        target_request.options.allow_overwrite = true;
+    }
+    let target = super::target(&target_request).await?;
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
+    }
+    if request.options.check_integrity && request.options.piece_hashes.is_some() && target.exists()
+    {
+        let partial = super::side_path(&target, ".ariai.remote.part");
+        tokio::fs::copy(&target, &partial).await?;
+        repair_partial(&request, &target, &cancel, &progress, limiter.as_deref()).await?;
+        ensure!(!cancel.is_cancelled(), "download cancelled");
+        let mut options = request.options.clone();
+        options.allow_overwrite = true;
+        let result = super::publish(&partial, &target, &options).await?;
+        let _ = tokio::fs::remove_file(super::side_path(&target, ".ariai.remote.json")).await;
+        return Ok(result);
     }
     let mut last = anyhow!("no FTP mirror succeeded");
     for attempt in 0..request.options.max_tries.max(1) {
         for uri in &request.uris {
-            let result = tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), result = transfer(&request, uri, &target, &cancel, &progress) => result };
+            let result = tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), result = transfer(&request, uri, &target, &cancel, &progress, None, limiter.as_deref()) => result };
             match result {
                 Ok(()) => {
                     let partial = super::side_path(&target, ".ariai.remote.part");
-                    let result = super::publish(&partial, &target, &request.options).await;
-                    let _ = tokio::fs::remove_file(super::side_path(&target, ".ariai.remote.json"))
-                        .await;
+                    let result = async {
+                        if request.options.piece_hashes.is_some() {
+                            repair_partial(
+                                &request,
+                                &target,
+                                &cancel,
+                                &progress,
+                                limiter.as_deref(),
+                            )
+                            .await?;
+                        }
+                        ensure!(!cancel.is_cancelled(), "download cancelled");
+                        super::publish(&partial, &target, &request.options).await
+                    }
+                    .await;
                     match result {
                         Ok(result) => {
+                            let _ = tokio::fs::remove_file(super::side_path(
+                                &target,
+                                ".ariai.remote.json",
+                            ))
+                            .await;
                             progress.send_modify(|p| {
                                 p.total_length = Some(result.total_length);
                                 p.completed_length = result.total_length;

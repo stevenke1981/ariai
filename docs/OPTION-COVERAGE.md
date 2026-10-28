@@ -2,7 +2,7 @@
 
 由 tools/option_coverage.py 依本次執行檔 --help 與上游選項盤點產生。這只表示 CLI 有受理旗標，不表示語義完整相容或每個選項已實測；範圍和差異見 [功能矩陣](FEATURES.md)。
 
-上游盤點 197 項，其中 50 項出現在本次 CLI help。這不是功能完成百分比。
+上游盤點 197 項，其中 52 項出現在本次 CLI help。這不是功能完成百分比。
 
 | 上游選項 | ariai CLI |
 |---|---|
@@ -233,9 +233,9 @@
 
 | `--max-mmap-limit` | 待補 |
 
-| `--max-overall-download-limit` | 待補 |
+| `--max-overall-download-limit` | 已受理，語義見功能矩陣 |
 
-| `--max-overall-upload-limit` | 待補 |
+| `--max-overall-upload-limit` | 已受理，語義見功能矩陣 |
 
 | `--max-resume-failure-tries` | 待補 |
 
@@ -402,4 +402,4 @@
 | `--version` | 已受理，語義見功能矩陣 |
 
 
-ariai 額外旗標：`--bt-initial-peer`、`--json`、`--load-session`、`--ssh-known-hosts`、`--ssh-passphrase`、`--ssh-private-key`。
+ariai 額外旗標：`--bt-initial-peer`、`--json`、`--load-session`、`--save-session-format`、`--ssh-known-hosts`、`--ssh-passphrase`、`--ssh-private-key`。

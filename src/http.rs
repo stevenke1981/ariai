@@ -49,8 +49,13 @@ impl HttpSession {
         }
         let mut cookies = CookieStore::default();
         if let Some(path) = &options.load_cookies {
-            let data = std::fs::read_to_string(path)
+            let bytes = std::fs::read(path)
                 .with_context(|| format!("reading cookies: {}", path.display()))?;
+            let data = if bytes.starts_with(b"SQLite format 3\0") {
+                browser_cookies(path, &bytes)?
+            } else {
+                String::from_utf8(bytes).context("cookie file is not UTF-8 Netscape format")?
+            };
             for (index, line) in data.lines().enumerate() {
                 let line = line.trim_end_matches('\r');
                 let (http_only, line) = if let Some(rest) = line.strip_prefix("#HttpOnly_") {
@@ -225,6 +230,10 @@ impl HttpSession {
                         &params,
                         request.method(),
                         request.url(),
+                        request
+                            .body()
+                            .and_then(|body| body.as_bytes())
+                            .unwrap_or_default(),
                         self.user.as_deref().unwrap(),
                         self.password.as_deref().unwrap_or(""),
                     )?);
@@ -285,6 +294,147 @@ impl HttpSession {
         Ok(())
     }
 }
+fn browser_cookies(path: &std::path::Path, bytes: &[u8]) -> Result<String> {
+    let mut wal_path = path.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    let wal = match std::fs::read(&wal_path) {
+        Ok(wal) if !wal.is_empty() => Some(wal),
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).context("reading browser cookie WAL"),
+    };
+    let db = match wal.as_deref() {
+        Some(wal) => sqlite::Database::open_with_wal(bytes, wal),
+        None => sqlite::Database::open(bytes),
+    }
+    .map_err(|e| anyhow!("invalid browser cookie SQLite database: {e}"))?;
+    ensure!(
+        db.problems.is_empty(),
+        "browser cookie SQLite database problem: {}",
+        db.problems.join("; ")
+    );
+    let (table_name, chromium) = if db.table("moz_cookies").is_some() {
+        ("moz_cookies", false)
+    } else if db.table("cookies").is_some() {
+        ("cookies", true)
+    } else {
+        return Err(anyhow!("unsupported browser cookie SQLite schema"));
+    };
+    let table = db.table(table_name).unwrap();
+    let columns = table.column_names();
+    let names = if chromium {
+        [
+            "host_key",
+            "path",
+            "is_secure",
+            "expires_utc",
+            "name",
+            "value",
+            "is_httponly",
+        ]
+    } else {
+        [
+            "host",
+            "path",
+            "isSecure",
+            "expiry",
+            "name",
+            "value",
+            "isHttpOnly",
+        ]
+    };
+    let indexes: Vec<usize> = names
+        .iter()
+        .map(|name| {
+            columns
+                .iter()
+                .position(|column| column.eq_ignore_ascii_case(name))
+                .with_context(|| format!("browser cookie SQLite schema missing column {name}"))
+        })
+        .collect::<Result<_>>()?;
+    let encrypted = if chromium {
+        Some(
+            columns
+                .iter()
+                .position(|name| name.eq_ignore_ascii_case("encrypted_value"))
+                .context("browser cookie SQLite schema missing column encrypted_value")?,
+        )
+    } else {
+        None
+    };
+    let mut result = String::new();
+    let mut rows = db
+        .rows(table_name)
+        .map_err(|e| anyhow!("reading browser cookie rows: {e}"))?;
+    for row in &mut rows {
+        let value = |i: usize| {
+            row.values
+                .get(indexes[i])
+                .context("incomplete browser cookie row")
+        };
+        let string =
+            |i| -> Result<&str> { value(i)?.as_text().context("invalid browser cookie text") };
+        let integer = |i| -> Result<i64> {
+            value(i)?
+                .as_integer()
+                .context("invalid browser cookie integer")
+        };
+        if let Some(index) = encrypted {
+            match row.values.get(index) {
+                Some(sqlite::Value::Blob(bytes)) if bytes.is_empty() => {}
+                Some(sqlite::Value::Blob(_)) => {
+                    return Err(anyhow!(
+                        "Chromium encrypted_value requires OS decryption, which is not supported"
+                    ));
+                }
+                _ => return Err(anyhow!("invalid Chromium encrypted_value")),
+            }
+        }
+        let domain = string(0)?;
+        let cookie_path = string(1)?;
+        let name = string(4)?;
+        let cookie_value = string(5)?;
+        ensure!(
+            ![domain, cookie_path, name, cookie_value]
+                .iter()
+                .any(|s| s.contains(['\t', '\r', '\n'])),
+            "invalid browser cookie field"
+        );
+        let expiry = integer(3)?;
+        let seconds = if chromium && expiry != 0 {
+            expiry
+                .checked_sub(11_644_473_600_000_000)
+                .context("invalid Chromium cookie expiry")?
+                / 1_000_000
+        } else {
+            expiry
+        };
+        if expiry != 0 && seconds <= 0 {
+            continue;
+        }
+        result.push_str(&format!(
+            "{}{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            if integer(6)? != 0 { "#HttpOnly_" } else { "" },
+            domain,
+            if domain.starts_with('.') {
+                "TRUE"
+            } else {
+                "FALSE"
+            },
+            cookie_path,
+            if integer(2)? != 0 { "TRUE" } else { "FALSE" },
+            seconds,
+            name,
+            cookie_value
+        ));
+    }
+    ensure!(
+        rows.problems().is_empty(),
+        "browser cookie SQLite row problem: {}",
+        rows.problems().join("; ")
+    );
+    Ok(result)
+}
 fn basic(user: &str, password: &str) -> String {
     use base64::Engine;
     format!(
@@ -343,6 +493,7 @@ fn digest_auth(
     params: &HashMap<String, String>,
     method: &Method,
     url: &Url,
+    body: &[u8],
     user: &str,
     password: &str,
 ) -> Result<String> {
@@ -361,21 +512,32 @@ fn digest_auth(
         ),
         "unsupported Digest algorithm: {algorithm}"
     );
-    let qop = params.get("qop");
-    if let Some(qop) = qop {
-        ensure!(
-            qop.split(',')
-                .any(|x| x.trim().eq_ignore_ascii_case("auth")),
-            "unsupported Digest qop: {qop}"
-        );
-    }
-    let hash = |v: &str| {
+    let qop = match params.get("qop") {
+        Some(offered)
+            if offered
+                .split(',')
+                .any(|q| q.trim().eq_ignore_ascii_case("auth")) =>
+        {
+            Some("auth")
+        }
+        Some(offered)
+            if offered
+                .split(',')
+                .any(|q| q.trim().eq_ignore_ascii_case("auth-int")) =>
+        {
+            Some("auth-int")
+        }
+        Some(offered) => return Err(anyhow!("unsupported Digest qop: {offered}")),
+        None => None,
+    };
+    let hash_bytes = |v: &[u8]| {
         if normalized.starts_with("MD5") {
-            hex::encode(Md5::digest(v.as_bytes()))
+            hex::encode(Md5::digest(v))
         } else {
-            hex::encode(Sha256::digest(v.as_bytes()))
+            hex::encode(Sha256::digest(v))
         }
     };
+    let hash = |v: &str| hash_bytes(v.as_bytes());
     let cnonce = uuid::Uuid::new_v4().simple().to_string();
     let uri = match url.query() {
         Some(q) => format!("{}?{q}", url.path()),
@@ -385,9 +547,13 @@ fn digest_auth(
     if normalized.ends_with("-SESS") {
         ha1 = hash(&format!("{ha1}:{nonce}:{cnonce}"));
     }
-    let ha2 = hash(&format!("{method}:{uri}"));
-    let response = if qop.is_some() {
-        hash(&format!("{ha1}:{nonce}:00000001:{cnonce}:auth:{ha2}"))
+    let ha2 = if qop == Some("auth-int") {
+        hash(&format!("{method}:{uri}:{}", hash_bytes(body)))
+    } else {
+        hash(&format!("{method}:{uri}"))
+    };
+    let response = if let Some(qop) = qop {
+        hash(&format!("{ha1}:{nonce}:00000001:{cnonce}:{qop}:{ha2}"))
     } else {
         hash(&format!("{ha1}:{nonce}:{ha2}"))
     };
@@ -402,8 +568,8 @@ fn digest_auth(
     if let Some(opaque) = params.get("opaque") {
         value.push_str(&format!(", opaque=\"{}\"", quote(opaque)));
     }
-    if qop.is_some() {
-        value.push_str(&format!(", qop=auth, nc=00000001, cnonce=\"{cnonce}\""));
+    if let Some(qop) = qop {
+        value.push_str(&format!(", qop={qop}, nc=00000001, cnonce=\"{cnonce}\""));
     } else if normalized.ends_with("-SESS") {
         value.push_str(&format!(", cnonce=\"{cnonce}\""));
     }

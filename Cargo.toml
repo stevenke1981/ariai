@@ -20,12 +20,15 @@ md-5 = "0.10"
 percent-encoding = "2"
 quick-xml = "0.42"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "socks"] }
+# librqbit uses reqwest 0.13; enable SOCKS for its metadata client as well.
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["socks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "3.0.1"
 sha1 = "0.10"
 sha2 = "0.10"
+sootmark-sqlite = "0.2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 url = "2"

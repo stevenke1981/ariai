@@ -13,10 +13,31 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{Mutex, watch},
 };
 use tokio_util::sync::CancellationToken;
+
+pub(crate) struct RateLimiter {
+    bytes_per_second: u64,
+    next: Mutex<Instant>,
+}
+impl RateLimiter {
+    pub(crate) fn new(bytes_per_second: u64) -> Self {
+        Self {
+            bytes_per_second,
+            next: Mutex::new(Instant::now()),
+        }
+    }
+    pub(crate) async fn acquire(&self, bytes: u64, cancel: &CancellationToken) -> Result<()> {
+        let mut next = tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), next = self.next.lock() => next };
+        let end = (*next).max(Instant::now())
+            + Duration::from_secs_f64(bytes as f64 / self.bytes_per_second as f64);
+        tokio::select! { _ = cancel.cancelled() => bail!("download cancelled"), _ = tokio::time::sleep(end.saturating_duration_since(Instant::now())) => {} }
+        *next = end;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Validator {
@@ -59,6 +80,7 @@ struct Shared {
     progress: watch::Sender<DownloadProgress>,
     state: Arc<Mutex<State>>,
     target: PathBuf,
+    limiter: Option<Arc<RateLimiter>>,
 }
 struct State {
     completed: u64,
@@ -105,6 +127,9 @@ async fn send(
     tokio::select! { _ = shared.cancel.cancelled() => bail!("download cancelled"), response = shared.client.send(builder) => response }
 }
 async fn update(shared: &Shared, bytes: u64) -> Result<()> {
+    if let Some(limiter) = &shared.limiter {
+        limiter.acquire(bytes, &shared.cancel).await?;
+    }
     let mut state = shared.state.lock().await;
     state.completed += bytes;
     let elapsed = state.start.elapsed().as_secs_f64().max(0.001);
@@ -223,10 +248,94 @@ async fn clear_parts(target: &Path, count: usize) {
     }
 }
 
+async fn export_aria2(target: &Path, cp: &Checkpoint) -> Result<()> {
+    if cp.length == 0 || (target.exists() && !side_path(target, ".aria2").exists()) {
+        return Ok(());
+    }
+    let piece = cp
+        .length
+        .div_ceil(65_536)
+        .max(1_048_576)
+        .div_ceil(1_048_576)
+        * 1_048_576;
+    if piece > u32::MAX as u64 {
+        return Ok(());
+    }
+    let count = cp.length.div_ceil(piece) as usize;
+    let mut output = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(target)
+        .await?;
+    let control_path = side_path(target, ".aria2");
+    if control_path.exists() {
+        tokio::fs::remove_file(&control_path).await?;
+    }
+    let mut spans = Vec::new();
+    for (i, ((start, end), size)) in cp.ranges.iter().zip(&cp.parts).enumerate() {
+        ensure!(*size <= end - start + 1, "invalid checkpoint part length");
+        if *size == 0 {
+            continue;
+        }
+        let mut input = tokio::fs::File::open(part_path(target, i)).await?;
+        output.seek(std::io::SeekFrom::Start(*start)).await?;
+        let copied = tokio::io::copy(&mut (&mut input).take(*size), &mut output).await?;
+        ensure!(copied == *size, "checkpoint part ended early");
+        spans.push((*start, start + size));
+    }
+    output.set_len(cp.length).await?;
+    output.sync_all().await?;
+    let mut complete = Vec::with_capacity(count);
+    let mut partial = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = i as u64 * piece;
+        let end = start.saturating_add(piece).min(cp.length);
+        let chunks: Vec<bool> = (0..(end - start).div_ceil(16_384))
+            .map(|j| {
+                let chunk_start = start + j * 16_384;
+                let chunk_end = (chunk_start + 16_384).min(end);
+                let mut covered = chunk_start;
+                for (a, b) in &spans {
+                    if *a <= covered && *b > covered {
+                        covered = *b;
+                    }
+                }
+                covered >= chunk_end
+            })
+            .collect();
+        let done = chunks.iter().all(|b| *b);
+        complete.push(done);
+        partial.push(if done { Vec::new() } else { chunks });
+    }
+    let control = crate::control::Control {
+        total: cp.length,
+        piece_length: piece as u32,
+        complete,
+        partial,
+    };
+    let temp = side_path(target, ".aria2.tmp");
+    let mut file = tokio::fs::File::create(&temp).await?;
+    file.write_all(&control.encode()).await?;
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(temp, control_path).await?;
+    Ok(())
+}
+
 pub async fn download(
     request: DownloadRequest,
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
+) -> Result<DownloadResult> {
+    download_with_limit(request, cancel, progress, None).await
+}
+
+pub(crate) async fn download_with_limit(
+    request: DownloadRequest,
+    cancel: CancellationToken,
+    progress: watch::Sender<DownloadProgress>,
+    limiter: Option<Arc<RateLimiter>>,
 ) -> Result<DownloadResult> {
     request.validate()?;
     let first = &request.uris[0];
@@ -242,6 +351,10 @@ pub async fn download(
                 matches!(url.scheme(), "http" | "https") && url.path().ends_with(".torrent")
             }));
     if torrent {
+        ensure!(
+            limiter.is_none(),
+            "global download limit is unsupported for BitTorrent sessions"
+        );
         return crate::torrent::download(request, cancel, progress).await;
     }
     let mut schemes = Vec::new();
@@ -273,12 +386,26 @@ pub async fn download(
             options: request.options.clone(),
         };
         let result = match scheme.as_str() {
-            "http" => download_http(attempt, cancel.clone(), progress.clone()).await,
+            "http" => {
+                download_http(attempt, cancel.clone(), progress.clone(), limiter.clone()).await
+            }
             "ftp" => {
-                crate::protocols::ftp::download(attempt, cancel.clone(), progress.clone()).await
+                crate::protocols::ftp::download_with_limit(
+                    attempt,
+                    cancel.clone(),
+                    progress.clone(),
+                    limiter.clone(),
+                )
+                .await
             }
             "sftp" => {
-                crate::protocols::sftp::download(attempt, cancel.clone(), progress.clone()).await
+                crate::protocols::sftp::download_with_limit(
+                    attempt,
+                    cancel.clone(),
+                    progress.clone(),
+                    limiter.clone(),
+                )
+                .await
             }
             _ => bail!("unsupported source protocol: {scheme}"),
         };
@@ -297,11 +424,13 @@ async fn download_http(
     request: DownloadRequest,
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
+    limiter: Option<Arc<RateLimiter>>,
 ) -> Result<DownloadResult> {
     request.validate()?;
     let options = &request.options;
     let client = HttpSession::new(options)?;
-    let result = download_http_inner(request.clone(), cancel, progress, client.clone()).await;
+    let result =
+        download_http_inner(request.clone(), cancel, progress, client.clone(), limiter).await;
     let saved = client.save_cookies().await;
     match result {
         Ok(result) => {
@@ -320,6 +449,7 @@ async fn download_http_inner(
     cancel: CancellationToken,
     progress: watch::Sender<DownloadProgress>,
     client: HttpSession,
+    limiter: Option<Arc<RateLimiter>>,
 ) -> Result<DownloadResult> {
     let options = &request.options;
     let name = match &options.out {
@@ -353,7 +483,15 @@ async fn download_http_inner(
         tokio::fs::create_dir_all(parent).await?;
     }
     if options.check_integrity && options.piece_hashes.is_some() && target.exists() {
-        crate::integrity::repair_file(&target, &request, &client, &cancel, &progress).await?;
+        crate::integrity::repair_file_with_limit(
+            &target,
+            &request,
+            &client,
+            &cancel,
+            &progress,
+            limiter.as_deref(),
+        )
+        .await?;
         let length = tokio::fs::metadata(&target).await?.len();
         progress.send_modify(|p| {
             p.path = Some(target.clone());
@@ -367,7 +505,8 @@ async fn download_http_inner(
             total_length: length,
         });
     }
-    if target.exists() && !options.allow_overwrite {
+    let resume_target = options.continue_download && side_path(&target, ".aria2").exists();
+    if target.exists() && !options.allow_overwrite && !resume_target {
         ensure!(
             options.auto_file_renaming,
             "output already exists: {}",
@@ -395,6 +534,7 @@ async fn download_http_inner(
             rate_at: now,
         })),
         target: target.clone(),
+        limiter,
     };
     progress.send_modify(|p| {
         p.path = Some(target.clone());
@@ -463,7 +603,7 @@ async fn download_http_inner(
     }
     let (ranged, total, validator, probe_url) = probe.ok_or(last)?;
     progress.send_modify(|p| p.total_length = total);
-    let part_count = if ranged {
+    let mut part_count = if ranged {
         let n = total.unwrap();
         ((n / options.min_split_size).max(1) as usize)
             .min(options.split)
@@ -473,7 +613,7 @@ async fn download_http_inner(
         1
     };
     let length = total.unwrap_or(0);
-    let ranges = if ranged {
+    let mut ranges = if ranged {
         (0..part_count)
             .map(|i| {
                 let start = length * i as u64 / part_count as u64;
@@ -489,7 +629,7 @@ async fn download_http_inner(
         Ok(bytes) => serde_json::from_slice::<Checkpoint>(&bytes).ok(),
         Err(_) => None,
     };
-    let can_resume = ranged
+    let mut can_resume = ranged
         && options.continue_download
         && validator.value().is_some()
         && previous.as_ref().is_some_and(|p| {
@@ -499,6 +639,83 @@ async fn download_http_inner(
                 && p.ranges == ranges
                 && p.parts.len() == part_count
         });
+    let aria2_path = side_path(&target, ".aria2");
+    let mut imported = false;
+    if options.continue_download && previous.is_none() && aria2_path.exists() {
+        ensure!(
+            ranged,
+            "aria2 resume requires a server supporting byte ranges"
+        );
+        ensure!(
+            tokio::fs::metadata(&aria2_path).await?.len() <= 16 * 1024 * 1024,
+            "aria2 control file is too large"
+        );
+        let bytes = tokio::fs::read(&aria2_path).await?;
+        let control = crate::control::Control::parse(&bytes)
+            .context("invalid or unsupported aria2 control file")?;
+        ensure!(
+            control.total == length,
+            "aria2 control length does not match source"
+        );
+        let mut source = tokio::fs::File::open(&target)
+            .await
+            .context("aria2 data file is missing")?;
+        let file_len = source.metadata().await?.len();
+        ranges.clear();
+        let mut starts = Vec::new();
+        for (i, done) in control.complete.iter().copied().enumerate() {
+            let piece_start = i as u64 * u64::from(control.piece_length);
+            let piece_end = piece_start
+                .saturating_add(u64::from(control.piece_length))
+                .min(length);
+            let partial = &control.partial[i];
+            let chunks = if partial.is_empty() {
+                1
+            } else {
+                (piece_end - piece_start).div_ceil(16_384)
+            };
+            for j in 0..chunks {
+                let start = if partial.is_empty() {
+                    piece_start
+                } else {
+                    piece_start + j * 16_384
+                };
+                let end = if partial.is_empty() {
+                    piece_end - 1
+                } else {
+                    start.saturating_add(16_384).min(piece_end) - 1
+                };
+                let done = done || partial.get(j as usize).copied().unwrap_or(false);
+                if starts.last().is_some_and(|(_, was_done)| *was_done == done) {
+                    ranges.last_mut().unwrap().1 = end;
+                } else {
+                    ranges.push((start, end));
+                    starts.push((start, done));
+                    ensure!(ranges.len() <= 4096, "aria2 control is too fragmented");
+                }
+                if done {
+                    ensure!(
+                        file_len > end,
+                        "aria2 data file is shorter than completed chunks"
+                    );
+                }
+            }
+        }
+        part_count = ranges.len();
+        clear_parts(&target, part_count).await;
+        for (i, ((start, end), (_, done))) in ranges.iter().zip(&starts).enumerate() {
+            if *done {
+                source.seek(std::io::SeekFrom::Start(*start)).await?;
+                let mut part = tokio::fs::File::create(part_path(&target, i)).await?;
+                let copied =
+                    tokio::io::copy(&mut (&mut source).take(end - start + 1), &mut part).await?;
+                ensure!(copied == end - start + 1, "aria2 data file ended early");
+                part.sync_all().await?;
+            }
+        }
+        can_resume = true;
+        imported = true;
+    }
     if !can_resume {
         if let Some(old) = &previous {
             clear_parts(&target, old.parts.len()).await;
@@ -548,7 +765,10 @@ async fn download_http_inner(
         let results = join_all(jobs).await;
         checkpoint(&target, &mut cp).await?;
         for result in results {
-            result?;
+            if let Err(error) = result {
+                export_aria2(&target, &cp).await?;
+                return Err(error);
+            }
         }
     } else {
         let mut succeeded = false;
@@ -603,9 +823,15 @@ async fn download_http_inner(
     if let Some(expected) = total {
         ensure!(written == expected, "assembled length mismatch");
     }
-    let repaired =
-        crate::integrity::repair_file(&assembled, &request, &shared.client, &cancel, &progress)
-            .await;
+    let repaired = crate::integrity::repair_file_with_limit(
+        &assembled,
+        &request,
+        &shared.client,
+        &cancel,
+        &progress,
+        shared.limiter.as_deref(),
+    )
+    .await;
     progress.send_modify(|p| p.path = Some(target.clone()));
     if let Err(err) = repaired {
         let _ = tokio::fs::remove_file(&assembled).await;
@@ -614,12 +840,15 @@ async fn download_http_inner(
     let written = tokio::fs::metadata(&assembled).await?.len();
     ensure!(!cancel.is_cancelled(), "download cancelled");
     if target.exists() {
-        ensure!(options.allow_overwrite, "output already exists");
-        tokio::fs::remove_file(&target).await?;
+        ensure!(
+            options.allow_overwrite || resume_target || imported,
+            "output already exists"
+        );
     }
     tokio::fs::rename(&assembled, &target).await?;
     clear_parts(&target, part_count).await;
     let _ = tokio::fs::remove_file(sidecar).await;
+    let _ = tokio::fs::remove_file(aria2_path).await;
     progress.send_modify(|p| {
         p.completed_length = written;
         p.total_length = Some(written);
