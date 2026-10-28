@@ -1,7 +1,7 @@
 use crate::{
     config::{apply_option, parse_bool, parse_size},
     manager::DownloadManager,
-    model::{DownloadOptions, DownloadRequest, DownloadStatus, ManagerOptions},
+    model::{DownloadOptions, DownloadRequest, DownloadStatus, ManagerOptions, SessionFormat},
     rpc,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -63,6 +63,7 @@ const GLOBAL_OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("rpc-listen-all", None, true),
     ("rpc-secret", None, false),
     ("save-session", None, false),
+    ("save-session-format", None, false),
     ("load-session", None, false),
     ("json", None, true),
     ("torrent-file", Some('T'), false),
@@ -81,6 +82,7 @@ struct Settings {
     listen_all: bool,
     secret: Option<String>,
     save: Option<PathBuf>,
+    session_format: SessionFormat,
     load: Option<PathBuf>,
     json: bool,
     torrent: Option<String>,
@@ -99,6 +101,13 @@ impl Settings {
             "rpc-listen-all" => self.listen_all = parse_bool(value)?,
             "rpc-secret" => self.secret = Some(value.into()),
             "save-session" => self.save = Some(value.into()),
+            "save-session-format" => {
+                self.session_format = match value {
+                    "json" => SessionFormat::Json,
+                    "aria2" => SessionFormat::Aria2,
+                    _ => bail!("save-session-format must be json or aria2"),
+                }
+            }
             "load-session" => self.load = Some(value.into()),
             "json" => self.json = parse_bool(value)?,
             "torrent-file" => self.torrent = Some(value.into()),
@@ -261,6 +270,7 @@ pub async fn run() -> Result<()> {
         max_overall_download_limit: settings.overall_download,
         max_overall_upload_limit: settings.overall_upload,
         session_file: settings.save.clone(),
+        session_format: settings.session_format,
         download_options: settings.download,
     })?;
     if let Some(path) = &settings.load {

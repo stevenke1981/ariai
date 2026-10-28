@@ -9,7 +9,7 @@ use crate::{
     engine,
     model::{
         DownloadOptions, DownloadProgress, DownloadRequest, DownloadSnapshot, DownloadStatus,
-        ManagerOptions,
+        ManagerOptions, SessionFormat,
     },
 };
 
@@ -488,12 +488,15 @@ impl DownloadManager {
         for finished in pending {
             Self::wait_finished(Some(finished)).await;
         }
-        if let Some(path) = &self.inner.options.session_file {
-            self.save_session(path).await?;
+        if self.inner.options.session_file.is_some() {
+            self.save_default_session().await?;
         }
         Ok(())
     }
     pub async fn save_session(&self, path: &Path) -> Result<()> {
+        self.save_session_as(path, SessionFormat::Json).await
+    }
+    pub async fn save_session_as(&self, path: &Path, format: SessionFormat) -> Result<()> {
         let state = self.inner.state.lock().await;
         let session = Session {
             version: 1,
@@ -513,8 +516,142 @@ impl DownloadManager {
                 })
                 .collect(),
         };
-        let bytes = serde_json::to_vec_pretty(&session)?;
         drop(state);
+        let bytes = match format {
+            SessionFormat::Json => serde_json::to_vec_pretty(&session)?,
+            SessionFormat::Aria2 => {
+                let mut text = String::from("# ariai-session-v1\n");
+                for entry in &session.downloads {
+                    let o = &entry.request.options;
+                    ensure!(
+                        entry.gid != "0000000000000000",
+                        "aria2 session cannot represent an all-zero gid"
+                    );
+                    ensure!(
+                        o.expected_length.is_none() && o.piece_hashes.is_none(),
+                        "aria2 session cannot represent Metalink length or piece hashes"
+                    );
+                    ensure!(
+                        o.load_cookies.is_none() && o.save_cookies.is_none(),
+                        "aria2 session cannot represent per-download cookie files"
+                    );
+                    ensure!(
+                        o.ssh_private_key.is_none()
+                            && o.ssh_passphrase.is_none()
+                            && o.ssh_known_hosts.is_none(),
+                        "aria2 session cannot represent per-download SSH credentials or known hosts"
+                    );
+                    ensure!(
+                        o.bt_initial_peers.is_empty()
+                            && o.bt_enable_dht
+                            && o.bt_listen_port.is_none(),
+                        "aria2 session cannot represent per-download peer, DHT or listen-port settings"
+                    );
+                    ensure!(
+                        (1024 * 1024..=1024 * 1024 * 1024).contains(&o.min_split_size),
+                        "aria2 session min-split-size must be between 1 MiB and 1 GiB"
+                    );
+                    ensure!(
+                        o.seed_time_explicit || o.seed_time_secs == 0,
+                        "aria2 session cannot represent implicit nonzero seed time"
+                    );
+                    ensure!(
+                        !o.seed_time_explicit || o.seed_time_secs % 60 == 0,
+                        "aria2 session cannot represent seed time with sub-minute precision"
+                    );
+                    for uri in &entry.request.uris {
+                        ensure!(
+                            !uri.chars().any(char::is_whitespace) && !uri.starts_with('#'),
+                            "aria2 session cannot represent URI containing whitespace or starting with #"
+                        );
+                    }
+                    text.push_str(&entry.request.uris.join("\t"));
+                    text.push('\n');
+                    let dir = o
+                        .dir
+                        .to_str()
+                        .context("aria2 session cannot represent non-UTF-8 directory")?;
+                    let mut options = vec![
+                        ("gid", entry.gid.clone()),
+                        ("pause", entry.paused.to_string()),
+                        ("dir", dir.to_owned()),
+                        ("split", o.split.to_string()),
+                        ("min-split-size", o.min_split_size.to_string()),
+                        ("continue", o.continue_download.to_string()),
+                        ("max-tries", o.max_tries.to_string()),
+                        ("retry-wait", o.retry_wait_secs.to_string()),
+                        ("timeout", o.timeout_secs.to_string()),
+                        ("connect-timeout", o.connect_timeout_secs.to_string()),
+                        ("user-agent", o.user_agent.clone()),
+                        ("http-auth-challenge", o.http_auth_challenge.to_string()),
+                        ("max-download-limit", o.max_download_limit.to_string()),
+                        ("max-upload-limit", o.max_upload_limit.to_string()),
+                        ("check-integrity", o.check_integrity.to_string()),
+                        ("allow-overwrite", o.allow_overwrite.to_string()),
+                        ("auto-file-renaming", o.auto_file_renaming.to_string()),
+                        ("ftp-pasv", o.ftp_pasv.to_string()),
+                        ("follow-torrent", o.follow_torrent.to_string()),
+                        ("follow-metalink", o.follow_metalink.to_string()),
+                    ];
+                    for (key, value) in [
+                        ("out", &o.out),
+                        ("referer", &o.referer),
+                        ("all-proxy", &o.proxy),
+                        ("http-user", &o.http_user),
+                        ("http-passwd", &o.http_passwd),
+                        ("checksum", &o.checksum),
+                        ("ftp-user", &o.ftp_user),
+                        ("ftp-passwd", &o.ftp_passwd),
+                        ("ssh-host-key-md", &o.ssh_host_key_md),
+                        ("select-file", &o.select_file),
+                    ] {
+                        if let Some(value) = value {
+                            options.push((key, value.clone()));
+                        }
+                    }
+                    for header in &o.headers {
+                        options.push(("header", header.clone()));
+                    }
+                    if !o.bt_trackers.is_empty() {
+                        ensure!(
+                            o.bt_trackers
+                                .iter()
+                                .all(|v| !v.is_empty() && !v.contains(',')),
+                            "aria2 session cannot represent tracker containing comma or empty tracker"
+                        );
+                        options.push(("bt-tracker", o.bt_trackers.join(",")));
+                    }
+                    if o.seed_time_explicit {
+                        options.push(("seed-time", (o.seed_time_secs / 60).to_string()));
+                    } else if o.seed_ratio.is_none() {
+                        options.push(("seed-time", "0".into()));
+                    }
+                    if let Some(ratio) = o.seed_ratio {
+                        options.push(("seed-ratio", ratio.to_string()));
+                    } else if o.seed_time_explicit && o.seed_time_secs > 0 {
+                        options.push(("seed-ratio", "0".into()));
+                    }
+                    for (key, value) in options {
+                        ensure!(
+                            !value.contains(['\r', '\n']) && value.trim() == value,
+                            "aria2 session cannot represent whitespace or newline in {key}"
+                        );
+                        ensure!(
+                            !matches!(key, "dir" | "out") || !value.contains("${HOME}"),
+                            "aria2 expands ${{HOME}} in {key}"
+                        );
+                        text.push_str(&format!(" {key}={value}\n"));
+                    }
+                    if !o.seed_time_explicit && o.seed_ratio.is_none() {
+                        text.push_str("# ariai-implicit-seed-time\n");
+                    }
+                    if o.seed_ratio.is_none() && o.seed_time_explicit && o.seed_time_secs > 0 {
+                        text.push_str("# ariai-implicit-seed-ratio\n");
+                    }
+                }
+                text.into_bytes()
+            }
+        };
         tokio::fs::write(path, bytes).await?;
         Ok(())
     }
@@ -525,9 +662,28 @@ impl DownloadManager {
                 serde_json::from_slice(&bytes)?
             } else {
                 let text = std::str::from_utf8(&bytes).context("session must be UTF-8")?;
+                let exported = text.lines().next() == Some("# ariai-session-v1");
                 let mut downloads: Vec<SessionEntry> = Vec::new();
                 for (index, raw) in text.lines().enumerate() {
                     let line = raw.trim();
+                    if exported && line == "# ariai-implicit-seed-time" {
+                        downloads
+                            .last_mut()
+                            .context("seed-time marker without URI")?
+                            .request
+                            .options
+                            .seed_time_explicit = false;
+                        continue;
+                    }
+                    if exported && line == "# ariai-implicit-seed-ratio" {
+                        downloads
+                            .last_mut()
+                            .context("seed-ratio marker without URI")?
+                            .request
+                            .options
+                            .seed_ratio = None;
+                        continue;
+                    }
                     if line.is_empty() || line.starts_with('#') {
                         continue;
                     }
@@ -553,7 +709,11 @@ impl DownloadManager {
                             gid: uuid::Uuid::new_v4().simple().to_string()[..16].to_owned(),
                             request: DownloadRequest {
                                 uris: line.split_whitespace().map(str::to_owned).collect(),
-                                options: self.download_options(),
+                                options: if exported {
+                                    DownloadOptions::default()
+                                } else {
+                                    self.download_options()
+                                },
                             },
                             paused: false,
                         });
@@ -630,6 +790,7 @@ impl DownloadManager {
             .session_file
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("session file is not configured"))?;
-        self.save_session(path).await
+        self.save_session_as(path, self.inner.options.session_format)
+            .await
     }
 }

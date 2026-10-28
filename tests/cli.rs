@@ -273,3 +273,51 @@ fn remote_metalink_redirect_uses_final_base_url() {
         b"hello"
     );
 }
+
+#[test]
+fn session_format_is_explicit_and_defaults_to_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.session");
+    std::fs::write(
+        &source,
+        "http://example.org/a\n gid=0123456789abcdef\n pause=true\n",
+    )
+    .unwrap();
+    for (format, suffix) in [(None, "json"), (Some("aria2"), "text")] {
+        let output = temp.path().join(suffix);
+        let mut cmd = binary();
+        cmd.args([
+            "--load-session",
+            source.to_str().unwrap(),
+            "--save-session",
+            output.to_str().unwrap(),
+        ]);
+        if let Some(format) = format {
+            cmd.args(["--save-session-format", format]);
+        }
+        let result = cmd.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let saved = std::fs::read_to_string(output).unwrap();
+        assert_eq!(saved.trim_start().starts_with('{'), format.is_none());
+        if format.is_some() {
+            assert!(saved.contains(" gid=0123456789abcdef\n"));
+        }
+    }
+    assert!(
+        !binary()
+            .args([
+                "--save-session-format",
+                "bad",
+                "--load-session",
+                source.to_str().unwrap()
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
