@@ -290,3 +290,176 @@ async fn overall_limit_covers_parallel_ranged_downloads() {
         elapsed
     );
 }
+
+#[tokio::test]
+async fn resumes_official_format_completed_pieces_and_inflight_chunks() {
+    let (url, server) = start(true, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("result.bin");
+    let mut data = vec![0; server.bytes.len()];
+    data[..32768].copy_from_slice(&server.bytes[..32768]);
+    data[32768..49152].copy_from_slice(&server.bytes[32768..49152]);
+    data[65536..98304].copy_from_slice(&server.bytes[65536..98304]);
+    tokio::fs::write(&target, data).await.unwrap();
+    // aria2 version 1, HTTP, four 32 KiB pieces, pieces 0 and 2 complete;
+    // piece 1 has a 16 KiB in-flight block, which is also retained.
+    let mut control = Vec::new();
+    control.extend_from_slice(&1u16.to_be_bytes());
+    control.extend_from_slice(&0u32.to_be_bytes());
+    control.extend_from_slice(&0u32.to_be_bytes());
+    control.extend_from_slice(&32768u32.to_be_bytes());
+    control.extend_from_slice(&131072u64.to_be_bytes());
+    control.extend_from_slice(&0u64.to_be_bytes());
+    control.extend_from_slice(&1u32.to_be_bytes());
+    control.push(0xa0);
+    control.extend_from_slice(&1u32.to_be_bytes());
+    control.extend_from_slice(&1u32.to_be_bytes());
+    control.extend_from_slice(&32768u32.to_be_bytes());
+    control.extend_from_slice(&1u32.to_be_bytes());
+    control.push(0x80);
+    tokio::fs::write(dir.path().join("result.bin.aria2"), control)
+        .await
+        .unwrap();
+    let mut req = request(vec![url], dir.path());
+    req.options.continue_download = true;
+    let result = download(req, CancellationToken::new(), progress().0)
+        .await
+        .unwrap();
+    assert_eq!(tokio::fs::read(result.path).await.unwrap(), *server.bytes);
+    let seen = server.seen.lock().unwrap().clone();
+    assert!(
+        seen.contains(&(49152, 65535)) && seen.contains(&(98304, 131071)),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.contains(&(0, 32767)) && !seen.contains(&(65536, 98303)),
+        "{seen:?}"
+    );
+    assert!(!dir.path().join("result.bin.aria2").exists());
+}
+
+#[tokio::test]
+async fn invalid_aria2_does_not_modify_existing_data() {
+    let (url, _) = start(true, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("result.bin");
+    tokio::fs::write(&target, b"original data").await.unwrap();
+    tokio::fs::write(dir.path().join("result.bin.aria2"), b"invalid")
+        .await
+        .unwrap();
+    let mut req = request(vec![url], dir.path());
+    req.options.continue_download = true;
+    assert!(
+        download(req, CancellationToken::new(), progress().0)
+            .await
+            .is_err()
+    );
+    assert_eq!(tokio::fs::read(&target).await.unwrap(), b"original data");
+    assert_eq!(
+        tokio::fs::read(dir.path().join("result.bin.aria2"))
+            .await
+            .unwrap(),
+        b"invalid"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires ARIA2C pointing to the official aria2 executable"]
+async fn official_aria2_bidirectional_resume() {
+    let aria2 = std::env::var_os("ARIA2C").expect("set ARIA2C to official aria2c");
+    let (url, server) = start(true, true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(vec![url.clone()], dir.path());
+    req.options.continue_download = true;
+    let cancel = CancellationToken::new();
+    let (tx, mut rx) = progress();
+    let task = tokio::spawn(download(req.clone(), cancel.clone(), tx));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            rx.changed().await.unwrap();
+            if rx.borrow().completed_length >= 70_000 {
+                cancel.cancel();
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(task.await.unwrap().is_err());
+    let path = dir.path().join("result.bin.aria2");
+    let saved = ariai::control::Control::parse(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    assert!(saved.partial.iter().flatten().any(|b| *b));
+    server.seen.lock().unwrap().clear();
+    let output = tokio::process::Command::new(&aria2)
+        .args([
+            "--no-conf",
+            "--continue=true",
+            "--file-allocation=none",
+            "--summary-interval=0",
+            "--dir",
+        ])
+        .arg(dir.path())
+        .args(["--out", "result.bin", &url])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        tokio::fs::read(dir.path().join("result.bin"))
+            .await
+            .unwrap(),
+        *server.bytes
+    );
+    assert!(
+        server.seen.lock().unwrap().iter().any(|(a, _)| *a > 0),
+        "aria2 did not issue a resumed range"
+    );
+
+    let other = tempfile::tempdir().unwrap();
+    let mut child = tokio::process::Command::new(&aria2)
+        .args([
+            "--no-conf",
+            "--file-allocation=none",
+            "--auto-save-interval=1",
+            "--max-download-limit=16K",
+            "--summary-interval=0",
+            "--dir",
+        ])
+        .arg(other.path())
+        .args(["--out", "result.bin", &url])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let control = other.path().join("result.bin.aria2");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(bytes) = tokio::fs::read(&control).await {
+                if let Ok(saved) = ariai::control::Control::parse(&bytes) {
+                    if saved.partial.iter().flatten().any(|b| *b) {
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    child.kill().await.unwrap();
+    server.seen.lock().unwrap().clear();
+    req.options.dir = other.path().to_path_buf();
+    let result = download(req, CancellationToken::new(), progress().0)
+        .await
+        .unwrap();
+    assert_eq!(tokio::fs::read(result.path).await.unwrap(), *server.bytes);
+    assert!(
+        server.seen.lock().unwrap().iter().any(|(a, _)| *a > 0),
+        "ariai did not issue a resumed range"
+    );
+}

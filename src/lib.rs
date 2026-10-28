@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod control;
 pub mod engine;
 pub mod http;
 pub mod integrity;
