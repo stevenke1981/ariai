@@ -21,6 +21,17 @@ async fn ftp_server(
     Arc<Mutex<Vec<String>>>,
     tokio::task::JoinHandle<()>,
 ) {
+    ftp_server_with_changed_size(content, false).await
+}
+
+async fn ftp_server_with_changed_size(
+    content: Vec<u8>,
+    change: bool,
+) -> (
+    SocketAddr,
+    Arc<Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let commands = Arc::new(Mutex::new(Vec::new()));
@@ -39,6 +50,7 @@ async fn ftp_server(
                 let mut passive = None;
                 let mut active = None;
                 let mut offset = 0usize;
+                let mut size_queries = 0;
                 while let Ok(Some(line)) = lines.next_line().await {
                     captured.lock().unwrap().push(line.clone());
                     let (cmd, arg) = line.split_once(' ').unwrap_or((&line, ""));
@@ -47,7 +59,13 @@ async fn ftp_server(
                         "PASS" if arg == "secret" => "230 ok\r\n".to_string(),
                         "PASS" => "530 rejected\r\n".to_string(),
                         "TYPE" => "200 binary\r\n".to_string(),
-                        "SIZE" => format!("213 {}\r\n", content.len()),
+                        "SIZE" => {
+                            size_queries += 1;
+                            format!(
+                                "213 {}\r\n",
+                                content.len() + usize::from(change && size_queries > 1)
+                            )
+                        }
                         "MDTM" => "213 20261028000000\r\n".to_string(),
                         "EPSV" => {
                             let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -187,15 +205,19 @@ async fn ftp_resume_cancel_and_auth_failure() {
 const TEST_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn\nNhAAAAAwEAAQAAAQEAzXFzBprJRnloMqy6YBEIHGSkA2HhAkXPfNqb66NW4vZRo5jyVqB9\nStvPc1mnLVdMBLLsPhs+/QNd9DP+1a2rbkHbA112mGlFjX28GeD7cJ8tbSLbO9Ovqs9Fr9\n7PTWLCgIwObWNcmedCHRZp1o61ZO7ez+YPtrl+97UPjwyvr9pJ9P5vtIFpWfUpzlUzA3OI\nlGEy3ozWAC3nz7BqeIrP6shQV92Z6YvzA4GmqzCIHGYu3LjMbykpmrgPvTbOVGk5MlV61u\n3VmpwwYAxfBYIIsW1CVFDYgoNhtz6CHrcL+yjaaMJ6XNdNv0Fkm718k3J/tr+NhaFxMGSd\nx/kLPozW+QAAA7jZ6aUF2emlBQAAAAdzc2gtcnNhAAABAQDNcXMGmslGeWgyrLpgEQgcZK\nQDYeECRc982pvro1bi9lGjmPJWoH1K289zWactV0wEsuw+Gz79A130M/7VratuQdsDXXaY\naUWNfbwZ4Ptwny1tIts706+qz0Wv3s9NYsKAjA5tY1yZ50IdFmnWjrVk7t7P5g+2uX73tQ\n+PDK+v2kn0/m+0gWlZ9SnOVTMDc4iUYTLejNYALefPsGp4is/qyFBX3Znpi/MDgaarMIgc\nZi7cuMxvKSmauA+9Ns5UaTkyVXrW7dWanDBgDF8FggixbUJUUNiCg2G3PoIetwv7KNpown\npc102/QWSbvXyTcn+2v42FoXEwZJ3H+Qs+jNb5AAAAAwEAAQAAAQAXOOu3o2d8/9w3Xi7z\nDPnNu9KOT1IP37REeLGHQT9hCFbSF0fNYvbGr3ITp96t0WBWZ6MsogfMscS9BeOYY7ktDW\nSkTLxLHhsukzff9P53DIcl/vqpGJSSyjsmVhk4tiEmRq6aztB41Rs0DoSILDl030twVKES\nFoWzmlPX56c0SVRzbbqrZr2D458iK4TxmAa2kmFJk0EicGpgZWNC8zcHKhkAblPb1PdfFE\nirphsql3yPa1InoGrp/X/uHXsT3MjDxgXwOUPsQHG2t2kLKbdPCJ1Cci3wysXpzvGfytOK\neheuvUMTcLDSw4Vf7nadT9CR2pP4QJsAbfdWza1aQt3BAAAAgG+4pVf6y26Ki/Q41mD8a6\nNv3wFNTkTgMVWXNezJ2zGhuaZgYqLu5n6GS1s0qyZzW7xfwyowajttWH4haHqddi1jYC53\nrKE0vLHsBiMlc/pyvr0QueWyAXy0OKcZ9YzS36H2A5dznpLuwnkgI/Aw7RsfgnXp2YdmpS\n+jl3L7OSDYAAAAgQD3idiLn9RDCEXBf4foi6r5j2B5h9sOIX5ixdfAlDZtcMd8eRVOFJNl\n1GpqJRqeh5QM2oV657fqHlqouSM0ooTwSHYBDpQDGV43u+YHFqGkKb3OC24sN/RejNyLDA\naP8MSCv8JhvjWnlMT9iFI+Es+1AjAov0s0T2K2L3xDbk6kqwAAAIEA1Hc8oE88mYLa+7x2\nykqMjoPb9b8J4I3oBvIUQIy+wKqe9K5s6rh3nIaaAnhOEwahOqayb0jfvkv4bc1taHBgQS\ndJ2lO2kZ+AZDZbboOD+Gi5iOnNphtCem/h2LTQ/crjcDx1QGfDOsfqtF1ggzXFJVNqJaUA\n+fC7anjMQbvHCusAAAAAAQID\n-----END OPENSSH PRIVATE KEY-----\n";
 
 #[derive(Clone, Default)]
-struct SshServer;
+struct SshServer {
+    reads: Arc<Mutex<Vec<(u64, u32)>>>,
+}
 struct SshHandler {
     channels: std::collections::HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+    reads: Arc<Mutex<Vec<(u64, u32)>>>,
 }
 impl russh::server::Server for SshServer {
     type Handler = SshHandler;
     fn new_client(&mut self, _: Option<SocketAddr>) -> Self::Handler {
         SshHandler {
             channels: Default::default(),
+            reads: self.reads.clone(),
         }
     }
 }
@@ -248,8 +270,9 @@ impl russh::server::Handler for SshHandler {
         if name == "sftp" {
             session.channel_success(id)?;
             let channel = self.channels.remove(&id).unwrap();
+            let reads = self.reads.clone();
             tokio::spawn(async move {
-                russh_sftp::server::run(channel.into_stream(), SftpFixture).await;
+                russh_sftp::server::run(channel.into_stream(), SftpFixture { reads }).await;
             });
         } else {
             session.channel_failure(id)?;
@@ -257,7 +280,9 @@ impl russh::server::Handler for SshHandler {
         Ok(())
     }
 }
-struct SftpFixture;
+struct SftpFixture {
+    reads: Arc<Mutex<Vec<(u64, u32)>>>,
+}
 impl russh_sftp::server::Handler for SftpFixture {
     type Error = russh_sftp::protocol::StatusCode;
     fn unimplemented(&self) -> Self::Error {
@@ -299,6 +324,7 @@ impl russh_sftp::server::Handler for SftpFixture {
         offset: u64,
         len: u32,
     ) -> Result<russh_sftp::protocol::Data, Self::Error> {
+        self.reads.lock().unwrap().push((offset, len));
         let contents = b"SFTP loopback!";
         let start = offset as usize;
         if start >= contents.len() {
@@ -338,8 +364,12 @@ async fn sftp_verified_host_authentication_and_transfer() {
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let server_reads = reads.clone();
     let task = tokio::spawn(async move {
-        let mut server = SshServer;
+        let mut server = SshServer {
+            reads: server_reads,
+        };
         let _ = server.run_on_socket(config, &listener).await;
     });
     let dir = tempfile::tempdir().unwrap();
@@ -391,12 +421,82 @@ async fn sftp_verified_host_authentication_and_transfer() {
     tokio::fs::write(known_hosts, "").await.unwrap();
     req.options.out = Some("unknown".into());
     assert!(
-        engine::download(req, CancellationToken::new(), progress())
+        engine::download(req.clone(), CancellationToken::new(), progress())
             .await
             .is_err()
     );
     assert!(!dir2.path().join("unknown").exists());
+    let dir3 = tempfile::tempdir().unwrap();
+    req.options.dir = dir3.path().to_owned();
+    req.options.out = Some("result".into());
+    req.options.ssh_known_hosts = None;
+    req.options.ssh_host_key_md = Some(format!("sha256={fingerprint}"));
+    req.options.ssh_private_key = None;
+    req.options.ftp_passwd = Some("secret".into());
+    set_pieces(&mut req, b"SFTP loopback!", 4);
+    req.options.check_integrity = true;
+    tokio::fs::write(dir3.path().join("result"), b"SFTPXXXXpback!")
+        .await
+        .unwrap();
+    reads.lock().unwrap().clear();
+    engine::download(req, CancellationToken::new(), progress())
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::fs::read(dir3.path().join("result")).await.unwrap(),
+        b"SFTP loopback!"
+    );
+    let offsets = reads.lock().unwrap().clone();
+    assert_eq!(offsets.len(), 1, "{offsets:?}");
+    assert_eq!(offsets[0].0, 4);
+    assert!(offsets[0].1 <= 4);
     task.abort();
+}
+
+fn set_pieces(req: &mut DownloadRequest, content: &[u8], size: usize) {
+    use sha2::{Digest, Sha256};
+    req.options.expected_length = Some(content.len() as u64);
+    req.options.piece_hashes = Some(ariai::model::PieceHashes {
+        length: size as u64,
+        algorithm: "sha256".into(),
+        hashes: content
+            .chunks(size)
+            .map(|piece| hex::encode(Sha256::digest(piece)))
+            .collect(),
+    });
+}
+
+#[tokio::test]
+async fn ftp_piece_repair_preserves_target_on_failure() {
+    let content = b"abcdefghijklm";
+    let (addr, commands, server) = ftp_server(content.to_vec()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(addr, dir.path());
+    set_pieces(&mut req, content, 4);
+    req.options.check_integrity = true;
+    let target = dir.path().join("result");
+    tokio::fs::write(&target, b"abcdXXXXijklm").await.unwrap();
+    engine::download(req.clone(), CancellationToken::new(), progress())
+        .await
+        .unwrap();
+    assert_eq!(tokio::fs::read(&target).await.unwrap(), content);
+    let calls = commands.lock().unwrap().clone();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|v| v.starts_with("REST "))
+            .collect::<Vec<_>>(),
+        vec!["REST 4"]
+    );
+    tokio::fs::write(&target, b"abcdXXXXijklm").await.unwrap();
+    req.options.piece_hashes.as_mut().unwrap().hashes[1] = "0".repeat(64);
+    assert!(
+        engine::download(req, CancellationToken::new(), progress())
+            .await
+            .is_err()
+    );
+    assert_eq!(tokio::fs::read(&target).await.unwrap(), b"abcdXXXXijklm");
+    server.abort();
 }
 
 #[tokio::test]
@@ -417,4 +517,94 @@ async fn ftp_checksum_mismatch_fails_over_to_next_mirror() {
     assert_eq!(tokio::fs::read(result.path).await.unwrap(), good_data);
     bad_server.abort();
     good_server.abort();
+}
+
+#[tokio::test]
+async fn ftp_repairs_complete_corrupt_partial_and_tries_next_mirror() {
+    use sha2::{Digest, Sha256};
+    let content = b"abcdefghijklm";
+    let (bad, bad_calls, bad_server) = ftp_server(b"abcdZZZZijklm".to_vec()).await;
+    let (good, good_calls, good_server) = ftp_server(content.to_vec()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(bad, dir.path());
+    req.uris
+        .push(format!("ftp://user:secret@{good}/file%20name"));
+    req.options.continue_download = true;
+    set_pieces(&mut req, content, 4);
+    tokio::fs::write(
+        dir.path().join("result.ariai.remote.part"),
+        b"abcdXXXXijklm",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        dir.path().join("result.ariai.remote.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "uri_hash": hex::encode(Sha256::digest(req.uris[0].as_bytes())),
+            "size": content.len(), "modified": "20261028000000"
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let result = engine::download(req, CancellationToken::new(), progress())
+        .await
+        .unwrap();
+    assert_eq!(tokio::fs::read(result.path).await.unwrap(), content);
+    assert!(bad_calls.lock().unwrap().iter().any(|v| v == "REST 4"));
+    assert!(good_calls.lock().unwrap().iter().any(|v| v == "REST 4"));
+    bad_server.abort();
+    good_server.abort();
+}
+
+#[tokio::test]
+async fn ftp_repair_rejects_changed_source_and_cancellation() {
+    let content = b"abcdefghijklm";
+    let (addr, _, server) = ftp_server_with_changed_size(content.to_vec(), true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(addr, dir.path());
+    set_pieces(&mut req, content, 4);
+    req.options.check_integrity = true;
+    let target = dir.path().join("result");
+    tokio::fs::write(&target, b"abcdXXXXijklm").await.unwrap();
+    assert!(
+        engine::download(req.clone(), CancellationToken::new(), progress())
+            .await
+            .is_err()
+    );
+    assert_eq!(tokio::fs::read(&target).await.unwrap(), b"abcdXXXXijklm");
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(engine::download(req, cancelled, progress()).await.is_err());
+    assert_eq!(tokio::fs::read(&target).await.unwrap(), b"abcdXXXXijklm");
+    server.abort();
+}
+
+#[tokio::test]
+async fn ftp_cancellation_during_piece_repair_keeps_original() {
+    let content = b"abcdefghijklm";
+    let (addr, calls, server) = ftp_server(content.to_vec()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(addr, dir.path());
+    set_pieces(&mut req, content, 4);
+    req.options.check_integrity = true;
+    req.options.max_download_limit = 1;
+    let target = dir.path().join("result");
+    tokio::fs::write(&target, b"abcdXXXXijklm").await.unwrap();
+    let cancel = CancellationToken::new();
+    let job = tokio::spawn(engine::download(req, cancel.clone(), progress()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if calls.lock().unwrap().iter().any(|v| v == "REST 4") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    cancel.cancel();
+    assert!(job.await.unwrap().is_err());
+    assert_eq!(tokio::fs::read(&target).await.unwrap(), b"abcdXXXXijklm");
+    server.abort();
 }
