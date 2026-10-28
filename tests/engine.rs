@@ -439,12 +439,11 @@ async fn official_aria2_bidirectional_resume() {
     let control = other.path().join("result.bin.aria2");
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            if let Ok(bytes) = tokio::fs::read(&control).await {
-                if let Ok(saved) = ariai::control::Control::parse(&bytes) {
-                    if saved.partial.iter().flatten().any(|b| *b) {
-                        break;
-                    }
-                }
+            if let Ok(bytes) = tokio::fs::read(&control).await
+                && let Ok(saved) = ariai::control::Control::parse(&bytes)
+                && saved.partial.iter().flatten().any(|b| *b)
+            {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

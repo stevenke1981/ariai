@@ -138,7 +138,8 @@ fn value(node: &Node) -> Result<Value, ()> {
             let hour: u32 = text[9..11].parse().map_err(|_| ())?;
             let minute: u32 = text[12..14].parse().map_err(|_| ())?;
             let second: u32 = text[15..17].parse().map_err(|_| ())?;
-            let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+            let leap =
+                year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
             let days = [
                 31,
                 if leap { 29 } else { 28 },

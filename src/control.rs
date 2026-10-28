@@ -74,7 +74,7 @@ impl Control {
             let mut field = vec![0; bits];
             c.read_exact(&mut field)?;
             let chunks = actual.div_ceil(16384) as usize;
-            if chunks % 8 != 0 {
+            if !chunks.is_multiple_of(8) {
                 ensure!(
                     field[bits - 1] & ((1 << (8 - chunks % 8)) - 1) == 0,
                     "invalid aria2 in-flight padding"

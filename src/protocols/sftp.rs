@@ -151,10 +151,10 @@ async fn transfer(
         .await??
         .attrs;
     let size = meta.size.context("SFTP server did not provide file size")?;
-    if range.is_some() {
-        if let Some(expected) = opts.expected_length {
-            ensure!(size == expected, "remote source length mismatch");
-        }
+    if range.is_some()
+        && let Some(expected) = opts.expected_length
+    {
+        ensure!(size == expected, "remote source length mismatch");
     }
     let identity = Identity {
         uri_hash: hex::encode(Sha256::digest(uri.as_bytes())),

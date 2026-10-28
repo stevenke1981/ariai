@@ -265,6 +265,7 @@ async fn export_aria2(target: &Path, cp: &Checkpoint) -> Result<()> {
     let mut output = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(target)
         .await?;
     let control_path = side_path(target, ".aria2");
