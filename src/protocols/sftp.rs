@@ -351,7 +351,14 @@ pub(crate) async fn download_with_limit(
                     let partial = super::side_path(&target, ".ariai.remote.part");
                     let result = async {
                         if request.options.piece_hashes.is_some() {
-                            repair_partial(&request, &target, &cancel, &progress, limiter.as_deref()).await?;
+                            repair_partial(
+                                &request,
+                                &target,
+                                &cancel,
+                                &progress,
+                                limiter.as_deref(),
+                            )
+                            .await?;
                         }
                         ensure!(!cancel.is_cancelled(), "download cancelled");
                         super::publish(&partial, &target, &request.options).await

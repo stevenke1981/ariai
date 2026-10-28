@@ -81,9 +81,11 @@ RPC 的 uploadLength／uploadSpeed／connections 回報 BT 引擎實際統計，
 
 ## 續傳與 session
 
-下載期間使用 `.ariai` 控制檔與分段暫存，`-c` 嘗試復原已有進度。來源 validator 不相容時重新下載，避免拼接不同版本。控制格式與 aria2 `.aria2` 不互通。
+下載期間使用 `.ariai` 控制檔與分段暫存，`-c` 嘗試復原已有進度。HTTP(S) 已知長度、支援 Range 的單檔也可匯入／輸出 aria2 v1 `.aria2` 控制檔；中斷時才輸出，強制終止不保證完成。與 aria2 1.37.0 已雙向接續實測。aria2 控制檔不含 URL 或 ETag，跨程式接續只能核對長度，無法確認來源內容未變；FTP、SFTP、BT 及 v0 格式尚未互通。大於 64 GiB 時可能須在 aria2 指定相符的 `--piece-length` 或使用 `--allow-piece-length-change`。
 
-`--save-session=queue.json` 儲存未完成工作；`--load-session=queue.json` 載入。這是 ariai JSON 格式，不能當成 aria2 文字 input file。Ctrl+C 的設計行為是停止下載、保留可復原進度並以非零退出；本次實際送出 Ctrl+C 的操作驗收為 NOT_RUN。Session 會保存工作選項，包含設定的認證或標頭，請放在合適的本機位置。
+`--save-session=queue.json` 預設儲存 ariai JSON；加上 `--save-session-format=aria2` 可輸出 aria2 文字 input file。`--load-session` 自動辨識 JSON 或支援的 aria2 文字選項；文字格式無法表達的設定會在輸出前報錯。Session 會保存工作選項，包含設定的認證或標頭，請放在合適的本機位置。Ctrl+C 的設計行為是停止下載並保留可復原進度；本次實際送出 Ctrl+C 的操作驗收為 NOT_RUN。
+
+`--max-overall-download-limit=1M` 在同一個 manager 中共用 HTTP(S)、FTP、SFTP 資料配額，包含分片修復。這是應用層限制，socket 緩衝、HTTP 探測與 Metalink metadata 不計入；與每工作限速同時設定時可能更慢。BT 與全域下載限速並用、或使用非零全域上傳限速，會明確報錯，尚待實作。
 
 ## 驗證
 

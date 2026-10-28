@@ -5,7 +5,7 @@
 | 功能族 | 目前實作 | 驗收／剩餘差距 |
 |---|---|---|
 | HTTP／HTTPS 串流、Range 分段 | 已實作 | 驗證 206、Content-Range、鏡像尺寸；不支援 Range 時降級 |
-| HTTP 續傳、validator | 已實作 | 中斷後續傳、來源版本改變重下載；控制檔與 aria2 不互通 |
+| HTTP 續傳、validator | 已實作 | 中斷後續傳、來源版本改變重下載；aria2 v1 控制檔限 HTTP(S) 已知長度 Range 單檔，與官方 aria2 1.37.0 雙向實測；跨程式僅能核對長度，無來源 validator |
 | HTTP／HTTPS／FTP／SFTP 鏡像 | 已實作故障切換 | 同一協定可重試；混合協定依群組切換，尚無同時跨來源拼接 |
 | FTP binary、EPSV/PASV、EPRT/PORT | 已實作 | 本機主動／被動、帳密、URL 編碼路徑實測；需要 SIZE；連線重用、FTP 代理待補 |
 | FTP REST 續傳 | 已實作 | 取消後續傳實測；URI、SIZE、MDTM 相容才使用暫存；缺 MDTM 時重啟下載 |
@@ -25,13 +25,13 @@
 | Metalink HTTP discovery、P2P resource | 尚未實作 | 目前以 -M 或 .meta4/.metalink 路徑展開 HTTP(S)/FTP/SFTP 來源 |
 | 佇列／並行／暫停／恢復／移除 | 已實作 | 等待及暫停工作可排序；暫停會等傳輸終止才回應 |
 | checksum、retry、timeout、redirect | 已實作基本版本 | 全檔 SHA-256／SHA-1／MD5；aria2 完整 retry 分類與語義待對齊 |
-| 每工作限速 | HTTP／FTP／SFTP／BT 已實作 | BT 另支援上傳；全域合計限速待補；長期精確效能量測 NOT_RUN |
+| 每工作／全域限速 | 各協定每工作限速；HTTP／FTP／SFTP 共用應用層下載配額 | 混合 HTTP＋FTP、HTTP 分段與修復實測；SFTP 混合總速 NOT_RUN。BT 全域下載、非零全域上傳明確拒絕；HTTP 探測、metadata 和 socket 緩衝不在配額內 |
 | Header／User-Agent／Referer／Basic／Digest | HTTP 已實作 | Digest MD5／SHA-256 及 sess，qop auth／auth-int／無 qop；netrc、gzip／deflate 待補 |
 | Cookies | Netscape 讀寫、Set-Cookie、Firefox／Chromium SQLite 匯入 | SQLite／WAL 合成資料實測；Chromium 加密值不支援，瀏覽器並行寫入、rollback journal 和實際個人設定檔 NOT_RUN；跨工作共享 jar／同檔合併待補；BT metadata 尚未接入 |
 | HTTP／SOCKS proxy | HTTP 透過 reqwest；BT SOCKS5 支援指定 peer | 受控 SOCKS5 轉送 HTTP metadata 和 peer 的 loopback 下載實測；BT 代理停用 tracker、DHT、入站且可能本機解析 DNS；FTP/SFTP 代理明確拒絕 |
 | TLS client certificate、自訂 CA | 尚未實作 | 目前使用 rustls 預設驗證 |
 | CLI／config／input／stdin | 已實作選項子集 | 未支援旗標會報錯；197 個上游長選項名稱見 aria2-options.txt |
-| Session 儲存／恢復 | 已實作 ariai JSON | 與 aria2 文字 session／.aria2 控制檔不互通；Torrent RPC metadata 持續保存在 .ariai-metadata |
+| Session 儲存／恢復 | ariai JSON 與 aria2 文字格式子集 | 預設 JSON，`--save-session-format=aria2` 明確選擇文字輸出，無法表達的設定報錯；實際 aria2 session 匯入測試依當次驗證結果為準。Torrent RPC metadata 持續保存在 .ariai-metadata |
 | HTTP JSON-RPC、batch、token secret | 已實作子集 | system.listMethods 列出實際方法；未列方法回錯誤 |
 | WebSocket JSON-RPC、下載事件 | 已實作 | Start/Pause/Stop/Complete/Error；首次認證前無事件；溢出則斷線重新查詢 |
 | addUri／addTorrent／addMetalink | 已實作 | base64 metadata；等待佇列 position；不支援 Torrent web-seed URI 注入 |
