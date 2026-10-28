@@ -1,5 +1,5 @@
 {
-  "observed_at": "2026-10-28T08:18:49.865966+00:00",
+  "observed_at": "2026-10-28T09:13:38.118822+00:00",
   "platform": "win32",
   "checks": [
     {
@@ -13,7 +13,7 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 0.26,
+      "seconds": 0.3,
       "output": "evidence\\format.log",
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
@@ -26,9 +26,9 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 49.94,
+      "seconds": 70.24,
       "output": "evidence\\tests.log",
-      "sha256": "eb6d81811cf4e728ceb9b4ee5974bd1f64cc2a7b20cb7fea05726e8e4464c527"
+      "sha256": "298305b89a150d9b0ab4b01681462dc5387b3c133db9ebc3d59237a6474f0b19"
     },
     {
       "name": "clippy",
@@ -43,9 +43,9 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 4.72,
+      "seconds": 5.47,
       "output": "evidence\\clippy.log",
-      "sha256": "e347d9a42b86eb44e50403a60609a6501a5c43afb6a1cd1cd30f57b0e5303960"
+      "sha256": "3490eabc185d0f15090242600077cfb7c1e002568c28b164ea33b2a513c4ba8d"
     },
     {
       "name": "release",
@@ -57,9 +57,9 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 52.51,
+      "seconds": 47.44,
       "output": "evidence\\release.log",
-      "sha256": "cea103e187d8534319de1b33a8db2f54fcc97834a025207ef773b4ca566e2625"
+      "sha256": "d771b5fff317c16e2f74d5875b6c3278aa85afef81fe3c4a5532382231a80413"
     },
     {
       "name": "version",
@@ -69,7 +69,7 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 0.41,
+      "seconds": 0.42,
       "output": "evidence\\version.log",
       "sha256": "5e0f5b49ed22a4711fd332fb556422cb7fe33f4a08b98c445f321683ae6bf8f0"
     },
@@ -84,46 +84,47 @@
       ],
       "exit_code": 0,
       "result": "PASS",
-      "seconds": 2.73,
+      "seconds": 3.01,
       "output": "evidence\\cli-smoke.log",
       "sha256": "97958518dc19e34fa4760be27d925ca4d96bac02c11c745152167363624847cd"
     }
   ],
   "result": "PASS",
   "source_sha256": {
-    "Cargo.toml": "f0ba723250839ffa182bd034a9a2f76eacecb09c71ef491d0d9b025b445cc4f4",
-    "Cargo.lock": "9ce8786edc66dfdc45923fe591a9937cf1c9655f71e2b59aca83a3dfd6623548",
-    "src\\cli.rs": "462cb64ff5db8d32dbdae0afacb9d6ce32f319443d67360413de3617526b37f2",
+    "Cargo.toml": "88c65be08960d83a4fa977e0435bc863f4232ef2920b49a70525f4f239536e75",
+    "Cargo.lock": "a493033abcff6baceced522f5f7e5c5ea9bdba0f852ff08e728eba724c2ebf0c",
+    "src\\cli.rs": "1006c2d7891f3ec27a225770b8487bff0aa49acedbe45e974b1607ad3389102f",
     "src\\config.rs": "dfd66017c34bdcb3c0a97984751e719225736f0d4a2fdb6fbf38e156ca57b5a8",
-    "src\\engine.rs": "01edeb1aa670d35c87db69a89b0de5430700c5b942c0c92cbb5626013cb4b1c7",
-    "src\\http.rs": "e3368c00d6e178ffe8a2103bb01c6abdb64d9e1c77027de82d6ae23ef2d5480f",
-    "src\\integrity.rs": "64e57f4fd1ea99a0fe45f91ef99ff8c205d2dda5414b7c3edb014df7ee0413e2",
-    "src\\lib.rs": "63f1fa50b2d720a257aca6e23917f1876d4cd46f8a244059e94f8870953d24c5",
+    "src\\control.rs": "a665c1d610c5d9b50d96eb269970c89e4c36e14881e4c1b89d6e91aa19e272bc",
+    "src\\engine.rs": "932c938232f1bd3a4dc4841601c69e38728e5163164b81bae7d129244111b99a",
+    "src\\http.rs": "e65efd4b05d38ce9fa74312387c1490405a6532ee0f6d3ea244ac12045a9db38",
+    "src\\integrity.rs": "b54dec84287129debaf51d82bb9e4e358bf6bb4586e880587385fbfe2111bcc2",
+    "src\\lib.rs": "26b695701f7d8d14f0890196ec6fc8f6a691528633e7538ee2d588288866e752",
     "src\\main.rs": "0e3b1d4a2a9e889ee15ab3e58f1dbb8b68850907898e8871cf37e8dc81a0588a",
-    "src\\manager.rs": "5dc2c057f3bde06422b56acd363571409370a5c13803d380e8ca1f83693ffe5c",
+    "src\\manager.rs": "bcd019eca7238e4ce465e4eadf405d0f4c554cf99290b001292ad5d621d60d49",
     "src\\metalink.rs": "d28dcdd02f60a39c81c8f4d7e3ffac8a8fb1080864dcbc22950444f96f46771a",
-    "src\\model.rs": "0d7ba0aa6be3ad085fb72eed712515582ac418f7c8c8749fbcdf9187100336d1",
-    "src\\protocols\\ftp.rs": "77ceea50d30359e9119090386331d753c64819ceaa75cc80a85da907327f35f3",
-    "src\\protocols\\mod.rs": "589f3736ec6ff63e757d60197bdfcedc1c11873ef27fdd295261fb3a7b95b0f5",
-    "src\\protocols\\sftp.rs": "c7522c60a95e333307534fd891d9099ff28b443cfde9a48eb7c53d62df088cd2",
-    "src\\rpc.rs": "30095e5101251282f51c3258619b1d3c6d7e77094d2f6ce51645341873134bcc",
+    "src\\model.rs": "e5153c06c27de59fb3ff71b236f475f5d81b0a3dc4a134e170d7836d5f3962d7",
+    "src\\protocols\\ftp.rs": "906da105e1165632f8c3e955a63d8ee5bb6b85400fad1533fb8a087f8dad76cf",
+    "src\\protocols\\mod.rs": "d427a797fa62cb084bbcee0d5181401894226a1ae3f0388631e697c63d64fe38",
+    "src\\protocols\\sftp.rs": "9b12c68ea7a53a23078faed75e12d74c5de85490d41b120ed7fbc56752cbb4dc",
+    "src\\rpc.rs": "0ef6d80aab6f9b8dc51e630a0c96c159727e33c52a0038a44f86b2765c6e7cdb",
     "src\\source.rs": "a1522e95b2e5f6802d1900c3145a0bd03a4a446f24f5960de179093d4139020d",
-    "src\\torrent.rs": "d11b3edf71bb03ee737761647a135ceb0675cd1921a00ae8bb041dc90b16fcd3",
-    "src\\xmlrpc.rs": "23a55f3974b908806404d8733e5f085dd51981c9ff03340bf3a7090fd87362e4",
-    "tests\\cli.rs": "3be79f449a5dd6278682151a0bec209a2dbdc5aee6b34b1c0a3ba2a5e6b4c208",
-    "tests\\engine.rs": "8069bc3e6e43716d7f2c4491391f66178b042a9297b89dc4ce79b38de230417b",
-    "tests\\http_auth.rs": "afb4aa6764ddcfdc8b843e78cb61dd78dccbb590d5678ad8da6e862a1aa84e56",
+    "src\\torrent.rs": "c1e0ab7249c6d4690fa408aa6440667b433de1bb5b6d5025b2ad0377428551aa",
+    "src\\xmlrpc.rs": "7308a0cb2788e49660f6210b573560e355496f646917f2ff49f22e765a5fd4ec",
+    "tests\\cli.rs": "6a8a9d32d22f5f4d046b01f1348f070be4d2685928c168e76caf527cd27679e1",
+    "tests\\engine.rs": "7b6878e9fa63a2395520409e253a52b2b6e9cc1f57fdc973033b332e1ddea723",
+    "tests\\http_auth.rs": "2b3583785669e25e7e46a5a2c250a5f95f5dae8e8153505e81f4ea67202c1734",
     "tests\\metalink.rs": "1c48958617dfc596edffc479a05beb1f8c3930cb4d68c89a7265aabee83bc038",
     "tests\\model.rs": "f605a1d25af67d945e093db8b410168dc2c65f6ce2859d6e270a616c37e353cc",
-    "tests\\remote.rs": "d93ad69ad6b43e6373d84fe7038c7e59d4dc4b56d91dd6b5031f099c84db4d86",
-    "tests\\repair.rs": "4a74b01ea958642485085a365f5169f76db2c11dc400bdf03bd097e5c02acc40",
-    "tests\\rpc.rs": "418b1c7f39afedfd1cbca63ab1a7e8f5c763ab645d4a6f8b2953dc7f6d3adccc",
-    "tests\\rpc_extended.rs": "808489e07f7d4bdd3583672c7073480dbb36a54bf3613ce1c67e08fabe352e35",
-    "tests\\torrent.rs": "10fd9ffbd36a5e3e9e14815151777384fba2eb4678fac6b6bb02016bd35ef341",
-    "tests\\xmlrpc.rs": "408ea5b0ac3382a012d7e1d62cfaf0088f3b42f1dee3747c53f71937910407ca"
+    "tests\\remote.rs": "685360a92da1c1b646d54eac2983bfe1b387b83228a1044fc928da6b41628e9e",
+    "tests\\repair.rs": "ee35dfd4c679b1f156408b4a229df9ca31eb030c5cc480b8a45d7aac4e2200d8",
+    "tests\\rpc.rs": "d3983ffc5bf2f389597463d4aad825438427eaa50a97499bce41d9bb328b5e8f",
+    "tests\\rpc_extended.rs": "78d4f7bd55f0253d1c2526b6dc5c48b4dc92e403dae16521fab820b104f969cb",
+    "tests\\torrent.rs": "e5807719af888f544d25eb749589f92839103a6403e759cab0408e3415a1d0bf",
+    "tests\\xmlrpc.rs": "fbbddaa7e1122a9c616974d4c0c486955fa5a2f380ced22e493718921efa9342"
   },
   "artifact": {
     "path": "C:\\Users\\steven\\AppData\\Local\\ariai-target\\release\\ariai.exe",
-    "sha256": "35113abbe7f9408351a77675bef5a72496f55ab2fdb6a2c2013e6d2870dca1d7"
+    "sha256": "b7b26a2a8aacb0c0de87b92b990dbc2a278ecb4a665607ca4703fbbac142433d"
   }
 }

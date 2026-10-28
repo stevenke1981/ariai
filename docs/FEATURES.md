@@ -31,7 +31,7 @@
 | HTTP／SOCKS proxy | HTTP 透過 reqwest；BT SOCKS5 支援指定 peer | 受控 SOCKS5 轉送 HTTP metadata 和 peer 的 loopback 下載實測；BT 代理停用 tracker、DHT、入站且可能本機解析 DNS；FTP/SFTP 代理明確拒絕 |
 | TLS client certificate、自訂 CA | 尚未實作 | 目前使用 rustls 預設驗證 |
 | CLI／config／input／stdin | 已實作選項子集 | 未支援旗標會報錯；197 個上游長選項名稱見 aria2-options.txt |
-| Session 儲存／恢復 | ariai JSON 與 aria2 文字格式子集 | 預設 JSON，`--save-session-format=aria2` 明確選擇文字輸出，無法表達的設定報錯；實際 aria2 session 匯入測試依當次驗證結果為準。Torrent RPC metadata 持續保存在 .ariai-metadata |
+| Session 儲存／恢復 | ariai JSON 與 aria2 文字格式子集 | 預設 JSON，`--save-session-format=aria2` 明確選擇文字輸出，無法表達的設定報錯；官方 aria2 1.37.0 實際讀取輸出並續傳。Torrent RPC metadata 持續保存在 .ariai-metadata |
 | HTTP JSON-RPC、batch、token secret | 已實作子集 | system.listMethods 列出實際方法；未列方法回錯誤 |
 | WebSocket JSON-RPC、下載事件 | 已實作 | Start/Pause/Stop/Complete/Error；首次認證前無事件；溢出則斷線重新查詢 |
 | addUri／addTorrent／addMetalink | 已實作 | base64 metadata；等待佇列 position；不支援 Torrent web-seed URI 注入 |
